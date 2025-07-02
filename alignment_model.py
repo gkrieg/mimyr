@@ -70,7 +70,7 @@ class AlignementModel():
         self.use_ccf=use_ccf
 
         concatenated_slices = ad.concat(slices)
-        self.pin_list = list(concatenated_slices.obs[self.pin_key].unique())
+        # self.pin_list = list(concatenated_slices.obs[self.pin_key].unique())
 
 
     def loss(self, reference_densitys, pinned_slice_densitys, velocity_field):

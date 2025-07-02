@@ -11,10 +11,10 @@ from sklearn.neighbors import KernelDensity
 from scipy.special import gamma
 
 class GeneExpModel(nn.Module):
-    def __init__(self, slices, use_subclass=False):
+    def __init__(self, slices, label="subclass"):
         super(GeneExpModel, self).__init__()
         self.slices = slices
-        self.use_subclass = use_subclass
+        self.label = label
         self.num_tokens=0        
         
 
@@ -26,55 +26,55 @@ class GeneExpModel(nn.Module):
 
         volume_unit_ball = np.pi ** (d / 2) / gamma(d / 2 + 1)
 
-        for slice in slices:
-            positions = slice.obsm["aligned_spatial"]
-            gt_tree = cKDTree(positions)
+        # for slice in slices:
+        #     positions = slice.obsm["aligned_spatial"]
+        #     gt_tree = cKDTree(positions)
 
-            densities = {1:[],5:[],10:[],15:[],20:[]}
+        #     densities = {1:[],5:[],10:[],15:[],20:[]}
 
-            spreads = []
-            entropies = []
+        #     spreads = []
+        #     entropies = []
 
-            k_entropy = 30  # or any number you want
-            for i, pos in tqdm.tqdm(list(enumerate(positions))):
-                # === DENSITIES === (unchanged from your version)
-                for k in [1, 5, 10, 15, 20]:
-                    distances, _ = gt_tree.query(pos, k=k+1)
-                    r_k = distances[-1]
-                    densities[k].append(1 / (r_k + 1e-12))
+        #     k_entropy = 30  # or any number you want
+        #     for i, pos in tqdm.tqdm(list(enumerate(positions))):
+        #         # === DENSITIES === (unchanged from your version)
+        #         for k in [1, 5, 10, 15, 20]:
+        #             distances, _ = gt_tree.query(pos, k=k+1)
+        #             r_k = distances[-1]
+        #             densities[k].append(1 / (r_k + 1e-12))
 
-                # === SPREAD === (still using fixed radius)
-                neighbors_idx = gt_tree.query_ball_point(pos, 0.05)
-                neighborhood = positions[neighbors_idx]
-                if len(neighborhood) > 1:
-                    centered = neighborhood - neighborhood.mean(axis=0)
-                    cov = np.cov(centered.T)
-                    spread = np.trace(cov)
-                else:
-                    spread = 0.0
-                spreads.append(spread)
+        #         # === SPREAD === (still using fixed radius)
+        #         neighbors_idx = gt_tree.query_ball_point(pos, 0.05)
+        #         neighborhood = positions[neighbors_idx]
+        #         if len(neighborhood) > 1:
+        #             centered = neighborhood - neighborhood.mean(axis=0)
+        #             cov = np.cov(centered.T)
+        #             spread = np.trace(cov)
+        #         else:
+        #             spread = 0.0
+        #         spreads.append(spread)
 
-                # === ENTROPY using k nearest neighbors ===
-                ds, knn_idx = gt_tree.query(pos, k=k_entropy + 1)  # includes self
-                neighborhood_knn = positions[knn_idx[1:]]/ds[-1]  # exclude the point itself
+        #         # === ENTROPY using k nearest neighbors ===
+        #         ds, knn_idx = gt_tree.query(pos, k=k_entropy + 1)  # includes self
+        #         neighborhood_knn = positions[knn_idx[1:]]/ds[-1]  # exclude the point itself
 
-                if len(neighborhood_knn) > 2:
-                    kde = KernelDensity(bandwidth=0.5)
-                    kde.fit(neighborhood_knn)
-                    log_probs = kde.score_samples(neighborhood_knn)
-                    entropy = -np.mean(log_probs)
-                else:
-                    entropy = np.nan
-                entropies.append(entropy)
+        #         if len(neighborhood_knn) > 2:
+        #             kde = KernelDensity(bandwidth=0.5)
+        #             kde.fit(neighborhood_knn)
+        #             log_probs = kde.score_samples(neighborhood_knn)
+        #             entropy = -np.mean(log_probs)
+        #         else:
+        #             entropy = np.nan
+        #         entropies.append(entropy)
 
-            slice.obs["density1"] = np.array(densities[1])
-            slice.obs["density5"] = np.array(densities[5])
-            slice.obs["density10"] = np.array(densities[10])
-            slice.obs["density15"] = np.array(densities[15])
-            slice.obs["density20"] = np.array(densities[20])
+        #     slice.obs["density1"] = np.array(densities[1])
+        #     slice.obs["density5"] = np.array(densities[5])
+        #     slice.obs["density10"] = np.array(densities[10])
+        #     slice.obs["density15"] = np.array(densities[15])
+        #     slice.obs["density20"] = np.array(densities[20])
 
-            # slice.obs["spread"] = np.array(spreads)
-            slice.obs["entropy"] = np.array(entropies)
+        #     # slice.obs["spread"] = np.array(spreads)
+        #     slice.obs["entropy"] = np.array(entropies)
         # for slice in slices:
         #     aligned = slice.obsm["aligned_spatial"]
         #     gt_tree = cKDTree(aligned)
@@ -101,24 +101,21 @@ class GeneExpModel(nn.Module):
         #     slice.obsm["pca"] = np.array(pca_features)
 
     def fit(self):
-        if self.use_subclass:
-            concatenated_slices=ad.concat(self.slices)
-            unique_subclasses = concatenated_slices.obs["class"].unique()
-            self.num_tokens=len(unique_subclasses)
-            subclass_to_id = {subclass: i for i, subclass in enumerate(unique_subclasses)}
-            self.subclass_to_id=subclass_to_id
-            concatenated_slices.obs["token"] = concatenated_slices.obs["class"].map(subclass_to_id)
+        concatenated_slices=ad.concat(self.slices)
+        unique_subclasses = concatenated_slices.obs[self.label].unique()
+        self.num_tokens=len(unique_subclasses)
+        subclass_to_id = {subclass: i for i, subclass in enumerate(unique_subclasses)}
+        self.subclass_to_id=subclass_to_id
+        concatenated_slices.obs["token"] = concatenated_slices.obs[self.label].map(subclass_to_id)
 
-            gene_exp_dict={i:concatenated_slices[concatenated_slices.obs["token"]==i].X.mean(0) for i in range(len(unique_subclasses))}            
-            # self.gene_exp_to_token = {concatenated_slices.X[i].sum():concatenated_slices.obs["token"][i] for i in range(len(concatenated_slices))}
-            row_sums = np.array(concatenated_slices.X.sum(axis=1)).flatten()  # Convert to 1D NumPy array
-            tokens = concatenated_slices.obs["token"].values  # Convert to NumPy array if needed
-            self.gene_exp_to_token = dict(zip(row_sums.flatten(), tokens))  # Use vectorized zip
+        gene_exp_dict={i:concatenated_slices[concatenated_slices.obs["token"]==i].X.mean(0) for i in range(len(unique_subclasses))}            
+        # self.gene_exp_to_token = {concatenated_slices.X[i].sum():concatenated_slices.obs["token"][i] for i in range(len(concatenated_slices))}
+        row_sums = np.array(concatenated_slices.X.sum(axis=1)).flatten()  # Convert to 1D NumPy array
+        tokens = concatenated_slices.obs["token"].values  # Convert to NumPy array if needed
+        self.gene_exp_to_token = dict(zip(row_sums.flatten(), tokens))  # Use vectorized zip
 
-            self.token_to_gene_exp = {i:gene_exp_dict[i] for i in range(len(unique_subclasses))}
-            self.concatenated_slices=concatenated_slices
-        else:
-            pass
+        self.token_to_gene_exp = {i:gene_exp_dict[i] for i in range(len(unique_subclasses))}
+        self.concatenated_slices=concatenated_slices
     
     def get_gene_exp_from_token(self, tokens):
         return [self.token_to_gene_exp[token] for token in tokens]

@@ -95,7 +95,7 @@ class Model(nn.Module):
 
         if rff_off:
             self.network = nn.Sequential(
-                nn.Linear(5,1024),#num_features if distance_transform_off else num_points+1, 1024),
+                nn.Linear(4,1024),#num_features if distance_transform_off else num_points+1, 1024),
                 nn.ReLU(),
                 nn.Linear(1024, 1024),
                 nn.ReLU(),
@@ -182,17 +182,17 @@ class CelltypeModel(nn.Module):
         self.best_model = None
 
         # Labels and inputs
-        parcellation_labels = self.all_slices.obs["parcellation_structure"].astype("category").cat.codes.values
-        parcellation_tensor = torch.tensor(parcellation_labels, dtype=torch.long).to(self.device)
-        one_hot_parcellation = torch.nn.functional.one_hot(parcellation_tensor).float()
-        self.parcellation_categories = self.all_slices.obs["parcellation_structure"].astype("category").cat.categories
+        # parcellation_labels = self.all_slices.obs["parcellation_structure"].astype("category").cat.codes.values
+        # parcellation_tensor = torch.tensor(parcellation_labels, dtype=torch.long).to(self.device)
+        # one_hot_parcellation = torch.nn.functional.one_hot(parcellation_tensor).float()
+        # self.parcellation_categories = self.all_slices.obs["parcellation_structure"].astype("category").cat.categories
 
         spatial_tensor = torch.tensor(self.all_slices.obsm["aligned_spatial"], dtype=torch.float32).to(self.device)
         # density_tensor = torch.tensor(self.all_slices.obs["density"], dtype=torch.float32).to(self.device)
-        entropy_tensor = torch.tensor(self.all_slices.obs["entropy"], dtype=torch.float32).to(self.device)
+        # entropy_tensor = torch.tensor(self.all_slices.obs["entropy"], dtype=torch.float32).to(self.device)
         # pca_tensor = torch.tensor(self.all_slices.obsm["pca"], dtype=torch.float32).to(self.device)
 
-        self.x = torch.cat([spatial_tensor,entropy_tensor.unsqueeze(-1)],dim=-1)
+        self.x = spatial_tensor#torch.cat([spatial_tensor,entropy_tensor.unsqueeze(-1)],dim=-1)
         self.y = torch.tensor(self.all_slices.obs["token"].values, dtype=torch.long).to(self.device)
 
         self.model = Model(num_features=self.x.shape[-1], num_classes=n_classes, distance_transform_off=False, memory_off=True, rff_off=True, attention_off=True).to(self.device)
@@ -236,6 +236,22 @@ class CelltypeModel(nn.Module):
             correct = 0
             total = 0
 
+            if self.val_slice and (epoch + 1) % 5 == 0:
+                val_score = self.evaluate_val()
+                val_scores.append(val_score)
+                print(f"🔍 Validation soft accuracy at epoch {epoch+1}: {val_score:.4f}")
+
+                if val_score > best_val_score:
+                    best_val_score = val_score
+                    self.best_model = deepcopy(self.model)
+                    epochs_since_improvement = 0
+                else:
+                    epochs_since_improvement += 1
+
+                if epochs_since_improvement >= early_stop_patience:
+                    print("⏹️ Early stopping triggered due to no improvement.")
+                    break
+
             for batch_x, batch_y in dataloader:
                 batch_x, batch_y = batch_x.to(self.device), batch_y.to(self.device)
                 self.optimizer.zero_grad()
@@ -253,21 +269,7 @@ class CelltypeModel(nn.Module):
             accuracy = correct / total
             print(f"🚀 Epoch [{epoch+1}/{self.epochs}] - Loss: {avg_loss:.4f} - Accuracy: {accuracy:.4f}")
 
-            if self.val_slice and (epoch + 1) % 5 == 0:
-                val_score = self.evaluate_val()
-                val_scores.append(val_score)
-                print(f"🔍 Validation soft accuracy at epoch {epoch+1}: {val_score:.4f}")
 
-                if val_score > best_val_score:
-                    best_val_score = val_score
-                    self.best_model = deepcopy(self.model)
-                    epochs_since_improvement = 0
-                else:
-                    epochs_since_improvement += 1
-
-                if epochs_since_improvement >= early_stop_patience:
-                    print("⏹️ Early stopping triggered due to no improvement.")
-                    break
 
         # At the end: restore best model and save weights
         if hasattr(self, 'best_model'):
@@ -278,9 +280,9 @@ class CelltypeModel(nn.Module):
     def evaluate_val(self):
         with torch.no_grad():
             val_x = torch.tensor(self.val_slice.obsm["aligned_spatial"], dtype=torch.float32).to(self.device)
-            density_tensor = torch.tensor(self.val_slice.obs["entropy"], dtype=torch.float32).to(self.device)
+            # density_tensor = torch.tensor(self.val_slice.obs["entropy"], dtype=torch.float32).to(self.device)
 
-            val_x = torch.cat([val_x,density_tensor.unsqueeze(-1)],dim=-1)
+            # val_x = torch.cat([val_x,density_tensor.unsqueeze(-1)],dim=-1)
 
             outputs = self.model(val_x)
             probs = torch.softmax(outputs, dim=1).cpu().numpy()
@@ -291,7 +293,7 @@ class CelltypeModel(nn.Module):
         pred_positions = self.val_slice.obsm["aligned_spatial"]
         pred_celltypes = preds
 
-        return soft_accuracy(gt_celltypes, gt_positions, pred_celltypes, pred_positions, radius=0.05)
+        return soft_accuracy(gt_celltypes, gt_positions, pred_celltypes, pred_positions, k=20, sample=50)
 
     def get_token_distr(self, index):
         self.model.eval()
