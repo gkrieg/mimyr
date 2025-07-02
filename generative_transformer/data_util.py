@@ -22,6 +22,8 @@ class _AnndataGenDataset(Dataset):
         max_len: int,
         scm: scMulan,
         include_0s: bool,
+        add_xyz_noise: bool,
+        min_max_bounds: List[int],
     ):
         """
         Expects:
@@ -35,13 +37,21 @@ class _AnndataGenDataset(Dataset):
         self.max_len   = max_len
         self.scm   = scm
         self.include_0s = include_0s
+        self.add_xyz_noise = add_xyz_noise
+        self.min_max_bounds = min_max_bounds
 
     def __len__(self):
         return self.adata.n_obs
 
     def __getitem__(self, idx):
         # 1) build the prompt
-        prompt_tokens, prompt_vals = generate_prompt_for_cg(idx, self.adata.obs, self.meta_pool, self.tok)
+        prompt_tokens, prompt_vals = generate_prompt_for_cg(idx, 
+                                                            self.adata.obs, 
+                                                            self.meta_pool, 
+                                                            self.tok, 
+                                                            self.add_xyz_noise, 
+                                                            self.min_max_bounds,
+                                                           )
         prompt_tokens += self.tok.encode([self.sep_token])
         prompt_vals += [0]
  
@@ -95,6 +105,8 @@ def get_generation_dataloader(
     shuffle: bool = True,
     num_workers: int = 4,
     include_0s: bool = True,
+    n_express_level: int = 10,
+    add_xyz_noise: bool = False,
 ) -> DataLoader:
     """
     Build a DataLoader for fine‑tuning on the conditional‑generation task.
@@ -122,7 +134,7 @@ def get_generation_dataloader(
     tokenizer.add_special_tokens({'sep_token': meta_info.get('sep_token', '<SPToken1>')})
     tokenizer.pad_token = '<SPToken10>'
 
-    scm = fine_tuning(adata, meta_info)
+    scm = fine_tuning(adata, meta_info, n_express_level=n_express_level)
     scm.data_preprocess()
 
     # 2) dataset
@@ -134,6 +146,8 @@ def get_generation_dataloader(
         max_len   = max_len,
         scm   = scm,
         include_0s = include_0s,
+        add_xyz_noise = add_xyz_noise,
+        min_max_bounds = [0,n_express_level - 1]
     )
 
     # 3) dataloader

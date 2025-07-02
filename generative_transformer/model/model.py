@@ -176,6 +176,30 @@ class scMulanModel(nn.Module):
                 nn.Linear(self.config.n_embd, 1)                   # hidden→scalar
             )
 
+    def resize_expression_embeddings(self, new_expression_level: int):
+        """
+        Grow (or shrink) the expression‐level embedding `wee`
+        to support values 0…new_expression_level (inclusive),
+        copying old weights and randomly initializing any new rows.
+        """
+        # how many bins we used to have (including zero)
+        old_emb = self.transformer.wee.weight.data
+        old_num, emb_dim = old_emb.shape
+
+        # how many we now want (remember wee was built with +1)
+        new_num = new_expression_level + 1
+
+        # 1) new embedding
+        new_emb = nn.Embedding(new_num, emb_dim)
+        with torch.no_grad():
+            # copy over the old rows
+            new_emb.weight[:old_num].copy_(old_emb)
+            # rows [old_num:] are freshly initialized
+        self.transformer.wee = new_emb
+
+        # 2) update config so that later calls (or re-initializations) know the new max
+        self.config.expression_level = new_expression_level
+
     def forward(self, 
                 idx=None,
                 inputs_embeds=None,
@@ -323,6 +347,93 @@ class scMulanModel(nn.Module):
     #         return input_ids,expression_level, hidden_states
     #     else:return input_ids, expression_level
 
+    # @torch.no_grad()
+    # def generate_cellGenesis(
+    #     self,
+    #     input_ids: torch.LongTensor,
+    #     expression_level: torch.LongTensor,
+    #     max_new_tokens: int,
+    #     ignore_Idx=None,
+    #     top_k=None,
+    #     return_dict_in_generate=False,
+    #     return_hidden=False,
+    #     gamma: float = 1.0,
+    # ):
+    #     """
+    #     Autoregressively generate gene tokens *and* real‐valued expression
+    #     using your MLP regression head on top of the pretrained categorical head.
+    #     """
+    #     scores = ()           # if return_dict_in_generate
+    #     hidden_states = ()    # if return_hidden
+    #     real_expr = torch.tensor(expression_level.clone(), dtype=torch.float)
+    
+    #     # loop until EOS (token 0) or length
+    #     while True:
+    #         # 1) forward one step
+    #         if return_hidden:
+    #             logits_cls, logits_exp, hidden = self(
+    #                 idx=input_ids,
+    #                 x_expr=expression_level,
+    #                 return_hidden=True
+    #             )
+    #             hidden_states += (hidden,)
+    #         else:
+    #             logits_cls, logits_exp, _, _, _ = self(
+    #                 idx=input_ids,
+    #                 x_expr=expression_level
+    #             )
+    
+    #         # 2) grab the *last* time-step logits
+    #         #    cls: (B, vocab_size), exp: (B,) real‐valued
+    #         logits_cls = logits_cls[:, -1, :]           # (B, C)
+    #         logits_exp = logits_exp[:, -1].float()      # (B, 1)
+    
+    #         # 3) mask out forbidden/seen tokens
+    #         if ignore_Idx is not None:
+    #             logits_cls[:, ignore_Idx] = float('-inf')
+    #         seen = input_ids[0, :-1]
+    #         logits_cls[:, seen] = float('-inf')
+    
+    #         # 4) top-k filtering
+    #         if top_k is not None:
+    #             v, _ = torch.topk(logits_cls, min(top_k, logits_cls.size(-1)), dim=-1)
+    #             logits_cls[logits_cls < v[:, [-1]]] = float('-inf')
+    
+    #         if return_dict_in_generate:
+    #             scores += (logits_cls,)
+    
+    #         # 5) sample next token
+    #         probs       = F.softmax(logits_cls, dim=-1)
+    #         probs[:, 0] = gamma * probs[:, 0]       # optional weighting for EOS
+    #         next_token  = torch.multinomial(probs, num_samples=1)  # (B,1)
+    
+    #         next_expr_real = logits_exp  # (B,1)
+
+    #         bin_next = torch.bucketize(next_expr_real, self.bin_edges)  # (B,)
+
+    #         bin_next = torch.clamp(bin_next, 0, self.bin_edges.numel()-1)  # (B,1)
+    
+    #         # print(expression_level.shape, bin_next.shape, next_expr_real.shape)    
+    #         # 8) append to sequence
+    #         input_ids        = torch.cat([input_ids, next_token], dim=1)
+    #         expression_level = torch.cat([expression_level, bin_next], dim=1)
+    #         real_expr = torch.cat([real_expr, next_expr_real], dim=1)
+    #         # 9) stop if EOS or too long
+    #         if (next_token == 0).all() or input_ids.size(1) >= max_new_tokens:
+    #             break
+    
+    #     if return_dict_in_generate:
+    #         return SampleDecoderOutput(
+    #             sequences=input_ids,
+    #             scores=scores,
+    #             hidden_states=hidden_states,
+    #             expression=expression_level,
+    #         )
+    #     elif return_hidden:
+    #         return input_ids, expression_level, real_expr, hidden_states
+    #     else:
+    #         return input_ids, expression_level, real_expr
+    
     @torch.no_grad()
     def generate_cellGenesis(
         self,
@@ -334,18 +445,26 @@ class scMulanModel(nn.Module):
         return_dict_in_generate=False,
         return_hidden=False,
         gamma: float = 1.0,
+        override_gene_sequence: Optional[torch.LongTensor] = None,
+        override_expr_sequence: Optional[torch.LongTensor] = None,
     ):
         """
-        Autoregressively generate gene tokens *and* real‐valued expression
-        using your MLP regression head on top of the pretrained categorical head.
+        Autoregressively generate gene tokens *and* real-valued expression.
+        Optionally use teacher-forced gene/expression tokens as model inputs,
+        but always return the model's own predictions as outputs.
         """
-        scores = ()           # if return_dict_in_generate
-        hidden_states = ()    # if return_hidden
-        real_expr = torch.tensor(expression_level.clone(), dtype=torch.float)
+        scores = ()
+        hidden_states = ()
     
-        # loop until EOS (token 0) or length
+        # Start with empty predictions
+        predicted_gene_tokens = []
+        predicted_expression_bins = []
+        predicted_real_expr = []
+    
         while True:
-            # 1) forward one step
+            step_idx = input_ids.size(1)
+    
+            # 1) model forward
             if return_hidden:
                 logits_cls, logits_exp, hidden = self(
                     idx=input_ids,
@@ -359,18 +478,16 @@ class scMulanModel(nn.Module):
                     x_expr=expression_level
                 )
     
-            # 2) grab the *last* time-step logits
-            #    cls: (B, vocab_size), exp: (B,) real‐valued
-            logits_cls = logits_cls[:, -1, :]           # (B, C)
-            logits_exp = logits_exp[:, -1].float()      # (B, 1)
+            logits_cls = logits_cls[:, -1, :]      # (B, vocab)
+            logits_exp = logits_exp[:, -1].float() # (B,)
     
-            # 3) mask out forbidden/seen tokens
+            # 2) mask invalid tokens
             if ignore_Idx is not None:
                 logits_cls[:, ignore_Idx] = float('-inf')
             seen = input_ids[0, :-1]
             logits_cls[:, seen] = float('-inf')
     
-            # 4) top-k filtering
+            # 3) top-k filter
             if top_k is not None:
                 v, _ = torch.topk(logits_cls, min(top_k, logits_cls.size(-1)), dim=-1)
                 logits_cls[logits_cls < v[:, [-1]]] = float('-inf')
@@ -378,41 +495,58 @@ class scMulanModel(nn.Module):
             if return_dict_in_generate:
                 scores += (logits_cls,)
     
-            # 5) sample next token
-            probs       = F.softmax(logits_cls, dim=-1)
-            probs[:, 0] = gamma * probs[:, 0]       # optional weighting for EOS
-            next_token  = torch.multinomial(probs, num_samples=1)  # (B,1)
+            # 4) sample model predictions
+            probs = F.softmax(logits_cls, dim=-1)
+            probs[:, 0] = gamma * probs[:, 0]
+            next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
     
-            # 6) take its real expression prediction
-            #    here logits_exp is real, so pick the entry for the sampled token?
-            #    **But** now that logits_exp is scalar, we just use it directly:
-            next_expr_real = logits_exp  # (B,1)
-
-            bin_next = torch.bucketize(next_expr_real, self.bin_edges)  # (B,)
-
-            # optionally clamp to [0..n_bins]:
-            bin_next = torch.clamp(bin_next, 0, self.bin_edges.numel()-1)  # (B,1)
+            next_expr_real = logits_exp            # (B, 1)
+            bin_next = torch.bucketize(next_expr_real, self.bin_edges)
+            bin_next = torch.clamp(bin_next, 0, self.bin_edges.numel() - 1)
     
-            # print(expression_level.shape, bin_next.shape, next_expr_real.shape)    
-            # 8) append to sequence
-            input_ids        = torch.cat([input_ids, next_token], dim=1)
-            expression_level = torch.cat([expression_level, bin_next], dim=1)
-            real_expr = torch.cat([real_expr, next_expr_real], dim=1)
-            # 9) stop if EOS or too long
-            if (next_token == 0).all() or input_ids.size(1) >= max_new_tokens:
+            # 5) record model predictions
+            predicted_gene_tokens.append(next_token)
+            predicted_expression_bins.append(bin_next)
+            predicted_real_expr.append(next_expr_real)
+    
+            # 6) prepare teacher-forced or predicted input for next step
+            if override_gene_sequence is not None and step_idx < override_gene_sequence.size(1):
+                input_token_for_next_step = override_gene_sequence[:, step_idx].unsqueeze(1)
+            else:
+                input_token_for_next_step = next_token
+    
+            if override_expr_sequence is not None and step_idx < override_expr_sequence.size(1):
+                expr_bin_for_next_step = override_expr_sequence[:, step_idx].unsqueeze(1)
+            else:
+                expr_bin_for_next_step = bin_next
+    
+            # 7) update inputs
+            input_ids = torch.cat([input_ids, input_token_for_next_step], dim=1)
+            expression_level = torch.cat([expression_level, expr_bin_for_next_step], dim=1)
+    
+            # 8) stop condition
+            if (next_token == 0).all() or predicted_gene_tokens.__len__() >= max_new_tokens:
                 break
+    
+        # concatenate predicted sequences
+        predicted_gene_tokens = torch.cat(predicted_gene_tokens, dim=1)         # (B, T)
+        predicted_expression_bins = torch.cat(predicted_expression_bins, dim=1) # (B, T)
+        predicted_real_expr = torch.cat(predicted_real_expr, dim=1)             # (B, T)
     
         if return_dict_in_generate:
             return SampleDecoderOutput(
-                sequences=input_ids,
+                sequences=predicted_gene_tokens,
                 scores=scores,
                 hidden_states=hidden_states,
-                expression=expression_level,
+                expression=predicted_expression_bins,
+                real_expression=predicted_real_expr,
             )
         elif return_hidden:
-            return input_ids, expression_level, real_expr, hidden_states
+            return predicted_gene_tokens, predicted_expression_bins, predicted_real_expr, hidden_states
         else:
-            return input_ids, expression_level, real_expr
+            return predicted_gene_tokens, predicted_expression_bins, predicted_real_expr
+
+
 
 @dataclass
 class SampleDecoderOutput(SampleDecoderOnlyOutput):

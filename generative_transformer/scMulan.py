@@ -13,6 +13,8 @@ from typing import Optional, List, Tuple, Union
 import pandas as pd
 import io
 import multiprocessing
+from tqdm import tqdm
+import time
 multiprocessing.set_start_method('spawn',force=True)
 
 class scMulan:
@@ -55,7 +57,7 @@ class scMulan:
             self.bin_edges = torch.tensor(bin_edges)
 
         self.mulan_gene_set = meta_info['gene_set']
-        self.mulan_cell_type_entities = list(meta_info['cell_type'] | meta_info['MCT'])
+        # self.mulan_cell_type_entities = list(meta_info['cell_type'] | meta_info['MCT'])
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -316,71 +318,244 @@ class scMulan:
         self.adata.obs['cell_type_from_scMulan'] = cell_types
         self.adata.obsm['X_scMulan'] = np.array(hidden_embds)
 
-    @torch.no_grad()
-    def generate_cell_genesis(
-        self,
-        idx: int,
-        max_new_tokens: int = 50,
-        top_k: int = 5,
-        **generate_kwargs
-    ) -> List[str]:
-        """
-        Generate a gene‐token sequence for cell `idx` via the model’s
-        generate_cellGenesis API.
+    # @torch.no_grad()
+    # def generate_cell_genesis(
+    #     self,
+    #     idx: int,
+    #     max_new_tokens: int = 50,
+    #     top_k: int = 5,
+    #     return_gt: bool = False,
+    #     cheat_with_tokens: bool = False,
+    #     cheat_with_expr: bool = False,
+    #     **generate_kwargs
+    # ) -> List[str]:
+    #     """
+    #     Generate a gene‐token sequence for cell `idx` via the model’s
+    #     generate_cellGenesis API.
 
-        Returns
-        -------
-        List[str]
-            The list of predicted gene‐token strings.
-        """
-        # 1) Build the prompt IDs + values
-        prompt_ids, prompt_vals = generate_prompt_for_cg(
-            idx,
-            self.adata.obs,
-            self.meta_info,
-            self.tokenizer
-        )
-        # 2) Append separator token and a dummy zero‐value
-        sep_id = self.tokenizer.convert_tokens_to_ids(self.meta_info.get('sep_token', '<SPToken1>'))
-        prompt_ids.append(sep_id)
-        prompt_vals.append(0)
+    #     Returns
+    #     -------
+    #     List[str]
+    #         The list of predicted gene‐token strings.
+    #     """
+    #     self.data_preprocess()
+    #     # 1) Build the prompt IDs + values
+    #     prompt_ids, prompt_vals = generate_prompt_for_cg(
+    #         idx,
+    #         self.adata.obs,
+    #         self.meta_info,
+    #         self.tokenizer
+    #     )
+    #     # 2) Append separator token and a dummy zero‐value
+    #     sep_id = self.tokenizer.convert_tokens_to_ids(self.meta_info.get('sep_token', '<SPToken1>'))
+    #     prompt_ids.append(sep_id)
+    #     prompt_vals.append(0)
+        
+    #     if return_gt == True or cheat_with_tokens == True or cheat_with_expr == True:
+    #         target_tokens, target_vals, target_real_vals = self.get_gene_and_expression_tokens(idx, include_0s=False)
+    #         target_tokens = prompt_ids + target_tokens + self.tokenizer.encode(['<E>'])
+    #         target_vals = prompt_vals + list(target_vals) + [0]
+    #         target_real_vals = prompt_vals + list(target_real_vals) + [0]
+    #         target_tokens   = torch.tensor(target_tokens,   dtype=torch.long).clone().unsqueeze(0).to(self.device)
+    #         target_vals   = torch.tensor(target_vals,   dtype=torch.long).clone().unsqueeze(0).to(self.device)
+    #         target_real_vals   = torch.tensor(target_real_vals,   dtype=torch.float32).clone().unsqueeze(0).to(self.device)
 
-        # 3) Convert to tensors, batch dim = 1
-        input_ids   = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
-        input_vals  = torch.tensor([prompt_vals], dtype=torch.long, device=self.device)
+    #     # 3) Convert to tensors, batch dim = 1
+    #     input_ids   = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
+    #     input_vals  = torch.tensor([prompt_vals], dtype=torch.long, device=self.device)
 
-        # 4) Call the model’s generate_cellGenesis
-        generated_ids, generated_vals_binned, generated_vals = self.model.generate_cellGenesis(
-            input_ids = input_ids,
-            expression_level   = input_vals,
-            max_new_tokens  = max_new_tokens + input_ids.shape[1],
-            top_k           = top_k,
-            **generate_kwargs
-        )
+    #     # 4) Call the model’s generate_cellGenesis
+    #     generated_ids, generated_vals_binned, generated_vals = self.model.generate_cellGenesis(
+    #         input_ids = input_ids,
+    #         expression_level   = input_vals,
+    #         max_new_tokens  = max_new_tokens + input_ids.shape[1],
+    #         top_k           = top_k,
+    #         override_gene_sequence = None if cheat_with_tokens != True else target_tokens,
+    #         override_expr_sequence = None if cheat_with_expr != True else target_vals,
+    #         **generate_kwargs
+    #     )
 
-        # generated_ids: Tensor shape (batch=1, total_len)
-        gen_seq = generated_ids[0].tolist()  # drop batch dim
-        gen_vals_binned = generated_vals_binned[0].tolist()
-        gen_vals = generated_vals[0].tolist()
+    #     # generated_ids: Tensor shape (batch=1, total_len)
+    #     gen_seq = generated_ids[0].tolist()  # drop batch dim
+    #     gen_vals_binned = generated_vals_binned[0].tolist()
+    #     gen_vals = generated_vals[0].tolist()
 
         
 
-        # 5) Remove the prompt prefix and sep, return only the newly generated gene tokens
-        n_prefix = len(prompt_ids)
-        new_ids   = gen_seq[n_prefix:]
-        new_vals  = gen_vals[n_prefix:]
+    #     # 5) Remove the prompt prefix and sep, return only the newly generated gene tokens
+    #     n_prefix = len(prompt_ids)
+    #     new_ids   = gen_seq[n_prefix:]
+    #     new_vals  = gen_vals[n_prefix:]
 
-        # 6) Convert IDs → token strings
-        gene_tokens = self.tokenizer.convert_ids_to_tokens(new_ids)
+    #     # 6) Convert IDs → token strings
+    #     gene_tokens = self.tokenizer.convert_ids_to_tokens(new_ids)
 
-        row = self.tokens_and_vals_to_expression_row(
-            var_names    = self.adata.var_names.tolist(),
-            gene_tokens  = gene_tokens,
-            new_vals     = new_vals,
-            return_series=False
-        )
+    #     row = self.tokens_and_vals_to_expression_row(
+    #         var_names    = self.adata.var_names.tolist(),
+    #         gene_tokens  = gene_tokens,
+    #         new_vals     = new_vals,
+    #         return_series=False
+    #     )
+    #     if return_gt == True:
+    #         return row, gene_tokens, new_vals, gen_seq, gen_vals_binned, gen_vals, target_tokens, target_vals, target_real_vals
+    #     return row, gene_tokens, new_vals, gen_seq, gen_vals_binned, gen_vals
 
-        return row, gene_tokens, new_vals, gen_seq, gen_vals_binned, gen_vals
+    
+
+    @torch.no_grad()
+    def generate_cell_genesis(
+        self,
+        idx: Union[int, List[int]],
+        max_new_tokens: int = 50,
+        top_k: int = 5,
+        return_gt: bool = False,
+        cheat_with_tokens: bool = False,
+        cheat_with_expr: bool = False,
+        batch_size: int = 12,
+        verbose: bool = False,
+        **generate_kwargs
+    ):
+        """
+        Generate gene-token sequences for idx via mini-batches of generate_cellGenesis calls.
+    
+        Parameters
+        ----------
+        idx : int or List[int]
+            Single index or list of indices from adata.obs
+        batch_size : int
+            Number of cells to process per model call
+        verbose : bool
+            If True, prints timing for each major step
+    
+        Returns
+        -------
+        List of generated results per cell
+        """
+        self.data_preprocess()
+    
+        if isinstance(idx, int):
+            idx = [idx]
+    
+        results = []
+        for start in tqdm(range(0, len(idx), batch_size)):
+            batch_start_time = time.time()
+            batch_indices = idx[start : start + batch_size]
+    
+            if verbose:
+                print(f"\nProcessing batch {start // batch_size + 1} / {((len(idx) - 1) // batch_size) + 1}")
+    
+            # === Prompt Construction ===
+            t0 = time.time()
+            prompt_ids_list = []
+            prompt_vals_list = []
+            target_tokens_list = []
+            target_vals_list = []
+            target_real_vals_list = []
+    
+            sep_id = self.tokenizer.convert_tokens_to_ids(self.meta_info.get('sep_token', '<SPToken1>'))
+    
+            for i in batch_indices:
+                prompt_ids, prompt_vals = generate_prompt_for_cg(
+                    i, self.adata.obs, self.meta_info, self.tokenizer
+                )
+                prompt_ids.append(sep_id)
+                prompt_vals.append(0)
+    
+                prompt_ids_list.append(prompt_ids)
+                prompt_vals_list.append(prompt_vals)
+    
+            if verbose:
+                print(f"  Prompt construction took {time.time() - t0:.2f} sec")
+    
+            # === Target Sequence Construction (optional) ===
+            if return_gt or cheat_with_tokens or cheat_with_expr:
+                t1 = time.time()
+                for i, prompt_ids, prompt_vals in zip(batch_indices, prompt_ids_list, prompt_vals_list):
+                    tgt_tokens, tgt_vals, tgt_real_vals = self.get_gene_and_expression_tokens(i, include_0s=False)
+                    tgt_tokens = prompt_ids + tgt_tokens + self.tokenizer.encode(['<E>'])
+                    tgt_vals = prompt_vals + list(tgt_vals) + [0]
+                    tgt_real_vals = prompt_vals + list(tgt_real_vals) + [0]
+    
+                    target_tokens_list.append(tgt_tokens)
+                    target_vals_list.append(tgt_vals)
+                    target_real_vals_list.append(tgt_real_vals)
+                if verbose:
+                    print(f"  Target sequence creation took {time.time() - t1:.2f} sec")
+    
+            # === Tensor Preparation ===
+            t2 = time.time()
+            max_len = max(len(p) for p in prompt_ids_list)
+            pad_token = 0
+    
+            input_ids = torch.full((len(batch_indices), max_len), pad_token, dtype=torch.long, device=self.device)
+            input_vals = torch.full((len(batch_indices), max_len), pad_token, dtype=torch.long, device=self.device)
+    
+            for b, (p_ids, p_vals) in enumerate(zip(prompt_ids_list, prompt_vals_list)):
+                plen = len(p_ids)
+                input_ids[b, :plen] = torch.tensor(p_ids, dtype=torch.long, device=self.device)
+                input_vals[b, :plen] = torch.tensor(p_vals, dtype=torch.long, device=self.device)
+    
+            override_gene_sequence = None
+            override_expr_sequence = None
+            if return_gt or cheat_with_tokens or cheat_with_expr:
+                max_target_len = max(len(t) for t in target_tokens_list)
+                override_gene_sequence = torch.full((len(batch_indices), max_target_len), pad_token, dtype=torch.long, device=self.device)
+                override_expr_sequence = torch.full((len(batch_indices), max_target_len), pad_token, dtype=torch.long, device=self.device)
+    
+                for b, (t_ids, t_vals) in enumerate(zip(target_tokens_list, target_vals_list)):
+                    tlen = len(t_ids)
+                    override_gene_sequence[b, :tlen] = torch.tensor(t_ids, dtype=torch.long, device=self.device)
+                    override_expr_sequence[b, :tlen] = torch.tensor(t_vals, dtype=torch.long, device=self.device)
+    
+            if verbose:
+                print(f"  Tensor preparation took {time.time() - t2:.2f} sec")
+    
+            # === Model Call ===
+            t3 = time.time()
+            generated_ids, generated_vals_binned, generated_vals = self.model.generate_cellGenesis(
+                input_ids=input_ids,
+                expression_level=input_vals,
+                max_new_tokens=max_new_tokens + input_ids.shape[1],
+                top_k=top_k,
+                override_gene_sequence=override_gene_sequence if cheat_with_tokens else None,
+                override_expr_sequence=override_expr_sequence if cheat_with_expr else None,
+                **generate_kwargs
+            )
+            if verbose:
+                print(f"  Model generation took {time.time() - t3:.2f} sec")
+    
+            # === Post-Processing ===
+            t4 = time.time()
+            for b in range(len(batch_indices)):
+                plen = len(prompt_ids_list[b])
+                gen_seq = generated_ids[b].tolist()
+                gen_vals = generated_vals[b].tolist()
+                gen_vals_binned = generated_vals_binned[b].tolist()
+    
+                new_ids = gen_seq[plen:]
+                new_vals = gen_vals[plen:]
+                gene_tokens = self.tokenizer.convert_ids_to_tokens(new_ids)
+    
+                row = self.tokens_and_vals_to_expression_row(
+                    var_names=self.adata.var_names.tolist(),
+                    gene_tokens=gene_tokens,
+                    new_vals=new_vals,
+                    return_series=False
+                )
+    
+                if return_gt:
+                    tgt_tokens = torch.tensor(target_tokens_list[b], dtype=torch.long, device=self.device).unsqueeze(0)
+                    tgt_vals = torch.tensor(target_vals_list[b], dtype=torch.long, device=self.device).unsqueeze(0)
+                    tgt_real_vals = torch.tensor(target_real_vals_list[b], dtype=torch.float32, device=self.device).unsqueeze(0)
+                    results.append((row, gene_tokens, new_vals, gen_seq, gen_vals_binned, gen_vals, tgt_tokens, tgt_vals, tgt_real_vals))
+                else:
+                    results.append((row, gene_tokens, new_vals, gen_seq, gen_vals_binned, gen_vals))
+            if verbose:
+                print(f"  Post-processing took {time.time() - t4:.2f} sec")
+                print(f"Total batch time: {time.time() - batch_start_time:.2f} sec")
+    
+        return results
+
 
 
 
@@ -495,17 +670,22 @@ def model_inference(ckp_path: str,
 def model_generate(ckp_path: str,
                     adata: AnnData,
                     meta_info: dict,
+                    use_kv_cache: bool=False,
                     **kwargs,
                     ):
     
     ckp = torch.load(ckp_path, map_location='cpu')
+    ckp['model_args']['expression_level'] = 100
     gptconf = MulanConfig(**ckp['model_args'])
     print(gptconf)
     gptconf.vocab_size = len(meta_info['token_set'])
     bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],gptconf.expression_level)
     gptconf.bin_edges = bin_edges
-    
-    model = scMulanModel(gptconf)
+
+    if use_kv_cache == False:
+        model = scMulanModel(gptconf)
+    else:
+        model = scMulanModel_kv(gptconf)
     model = model.cuda() if torch.cuda.is_available() else model
     model.load_state_dict(ckp['model'])
     model.eval()
@@ -524,11 +704,11 @@ def model_generate(ckp_path: str,
 def fine_tuning(
                     adata: AnnData,
                     meta_info: dict,
+                    n_express_level: int = 10,
                     **kwargs
                     ):
 
     tokenizer = scMulanTokenizer(meta_info['token_set'])
-    n_express_level = 10
     bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],n_express_level)
 
     scml = scMulan(adata,meta_info,tokenizer,n_express_level, bin_edges=bin_edges, **kwargs)
@@ -540,7 +720,9 @@ def generate_prompt_for_cg(
     idx: int,
     meta_data: pd.DataFrame,
     meta_pool: dict,
-    tokenizer: scMulanTokenizer
+    tokenizer: scMulanTokenizer,
+    add_xyz_noise: bool = False,
+    min_max_bounds=None
 ) -> Tuple[List[int], List[int]]:
     """
     Build prompt IDs by scanning meta_pool for keys that are actual
@@ -580,10 +762,25 @@ def generate_prompt_for_cg(
         prompt_ids.append(col_id)
         prompt_vals.append(0)
 
-    for coord in ['<x>','<y>','<z>']:
+    # for coord in ['<x>','<y>','<z>']:
+    #     if coord in meta_data.columns:
+    #         col_idx = col_positions[coord]
+    #         val = meta_data.iat[idx, col_idx]
+    #         prompt_ids.append(tokenizer.convert_tokens_to_ids([coord])[0])
+    #         prompt_vals.append(val)
+
+    for coord in ['<x>', '<y>', '<z>']:
         if coord in meta_data.columns:
             col_idx = col_positions[coord]
             val = meta_data.iat[idx, col_idx]
+
+            if add_xyz_noise:
+                val = int(val)  # ensure it's an integer
+                noise = np.random.choice([-1, 0, 1])  # discrete noise
+                val += noise
+                min_val, max_val = min_max_bounds
+                val = max(min_val, min(val, max_val))  # clamp
+
             prompt_ids.append(tokenizer.convert_tokens_to_ids([coord])[0])
             prompt_vals.append(val)
         
@@ -604,7 +801,7 @@ def compute_global_bin_edges(
     Stores the result in self.bin_edges of length (n_bins+1).
     """
     adata_var = set(adata.var_names.tolist())
-    adata = adata[:,mulan_gene_set].copy()
+    adata = adata[:,mulan_gene_set]
     cellDFHVG = pd.DataFrame(adata.X.toarray(), columns = mulan_gene_set)
     cellDFHVG.index = list(adata.obs.index)
     adata_matrix = cellDFHVG

@@ -64,6 +64,10 @@ def main():
                         help="Indicate checkpoint already includes finetuned vocab size")
     parser.add_argument("--overwrite-vocab-size", type=int, default=None,
                         help="If set, overwrite the model and config vocab_size to this value before loading state_dict")
+    parser.add_argument("--new-expression-size", type=int, default=None,
+                        help="If set, overwrite the model and config n_expression_level to this value")
+    parser.add_argument("--xyz-noise",    action="store_true",
+                        help="Whether to add noise to x,y,z coordinates during training")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -97,19 +101,47 @@ def main():
         # resize_token_embeddings comes from PreTrainedModel
         model.resize_token_embeddings(len(tokenizer))
         model.config.vocab_size = len(tokenizer)
+        if args.new_expression_size:
+            model.resize_expression_embeddings(args.new_expression_size)
+            model.config.expression_level = args.new_expression_size
     model.to(device)
 
-    print('initialized model')
+    print('initialized model', flush=True)
     # 4) Load AnnData and split into train/validation
     adata = sc.read_h5ad(args.adata)
+
+    # Add genes for mulan gene set
+    existing_genes = adata.var_names.tolist()
+    
+    gene_set = list(meta_info['gene_set'])
+    new_genes = [g for g in gene_set if g not in existing_genes]
+    
+    print(f"Adding {len(new_genes)} new genes to adata")
+    
+    if len(new_genes) > 0:
+        n_obs = adata.n_obs
+        if sp.issparse(adata.X):
+            new_data = sp.csr_matrix((n_obs, len(new_genes)))
+            adata.X = sp.hstack([adata.X, new_data], format='csr')
+        else:
+            new_data = np.zeros((n_obs, len(new_genes)))
+            adata.X = np.hstack([adata.X, new_data])
+    
+        new_var = pd.DataFrame(index=new_genes)
+        adata.var = adata.var.join(new_var)
+    
+        adata.var_names_make_unique()
+    
+    print('adata loaded')
     n_cells = adata.n_obs
     if args.val_split > 0:
         idxs = np.arange(n_cells)
         np.random.shuffle(idxs)
         n_val = int(n_cells * args.val_split)
         val_idxs, train_idxs = idxs[:n_val], idxs[n_val:]
-        adata_train = adata[train_idxs].copy()
-        adata_val   = adata[val_idxs].copy()
+        adata_val = adata[val_idxs].copy()  # Small, independent copy
+        adata._inplace_subset_obs(~adata.obs_names.isin(adata.obs_names[val_idxs]))
+        adata_train = adata
     else:
         adata_train = adata
         adata_val   = None
@@ -122,6 +154,7 @@ def main():
         shuffle    = not args.no_shuffle,
         num_workers= args.num_workers,
         include_0s = False,
+        add_xyz_noise = args.xyz_noise,
     )
     if adata_val is not None:
         val_loader = get_generation_dataloader(
