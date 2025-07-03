@@ -248,10 +248,15 @@ class scMulanModel_kv(nn.Module):
         logits_labels = self.lm_head(x)
         logits_exp = self.epx_head(x)
 
-        return logits_labels, logits_exp, tuple(presents_kv)
+        B, T, V = logits_exp.size()
+        flat_exp = logits_exp.view(-1, V)             # (B*T, V)
+        flat_reg = self.epx_regressor(flat_exp)       # (B*T, 1)
+        logits_reg = flat_reg.view(B, T, 1)           # (B, T, 1)
+
+        return logits_labels, logits_reg, tuple(presents_kv)
 
     @torch.no_grad()
-    def generate_cellGenesis(self, input_ids, expression_level, max_new_tokens, ignore_Idx=None, top_k=None, gamma=1.0, override_gene_sequence=None, override_expr_sequence=None):
+    def generate_cellGenesis(self, input_ids, expression_level, max_new_tokens, ignore_Idx=None, top_k=None, gamma=1.0, override_gene_sequence=None, override_expr_sequence=None, verbose=False):
         output_idx = input_ids
         output_expr = expression_level
         real_expr = expression_level.float()
@@ -265,7 +270,7 @@ class scMulanModel_kv(nn.Module):
             logits_cls, logits_exp, past_key_values = self(idx=output_idx[:, -1:], x_expr=output_expr[:, -1:], past_key_values=past_key_values)
             
             logits_cls = logits_cls[:, -1, :]
-            logits_exp = logits_exp[:, -1, :]
+            logits_exp = logits_exp[:, -1].float() # (B,)
 
             if ignore_Idx is not None:
                 logits_cls[:, ignore_Idx] = float('-inf')
@@ -281,7 +286,7 @@ class scMulanModel_kv(nn.Module):
             probs[:, 0] *= gamma
             next_token = torch.multinomial(probs, num_samples=1)
 
-            next_expr_real = logits_exp[torch.arange(logits_exp.size(0)), next_token.squeeze(1)].unsqueeze(1)
+            next_expr_real = logits_exp
             bin_next = torch.bucketize(next_expr_real, self.bin_edges)
             bin_next = torch.clamp(bin_next, 0, self.bin_edges.numel() - 1)
 

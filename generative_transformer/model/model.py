@@ -256,10 +256,6 @@ class scMulanModel(nn.Module):
             #   pred_vals = logits_exp[:, :-1].reshape(-1)
             #   true_vals = y_expr[:, 1:].reshape(-1)
             # Otherwise, to predict at each position:
-            B, T, V = logits_exp.size()
-            flat_exp = logits_exp.view(-1, V)             # (B*T, V)
-            flat_reg = self.epx_regressor(flat_exp)       # (B*T, 1)
-            logits_reg = flat_reg.view(B, T, 1)           # (B, T, 1)
 
             pred_vals = logits_reg.squeeze(-1)
             shift_pred = pred_vals[:,:-1].contiguous()
@@ -447,6 +443,7 @@ class scMulanModel(nn.Module):
         gamma: float = 1.0,
         override_gene_sequence: Optional[torch.LongTensor] = None,
         override_expr_sequence: Optional[torch.LongTensor] = None,
+        verbose: bool = False, 
     ):
         """
         Autoregressively generate gene tokens *and* real-valued expression.
@@ -477,7 +474,9 @@ class scMulanModel(nn.Module):
                     idx=input_ids,
                     x_expr=expression_level
                 )
-    
+            if verbose == True:
+                predicted_token_ids = torch.argmax(logits_cls, dim=-1)
+                print(f'predicted token ids: {predicted_token_ids}')
             logits_cls = logits_cls[:, -1, :]      # (B, vocab)
             logits_exp = logits_exp[:, -1].float() # (B,)
     
@@ -500,7 +499,7 @@ class scMulanModel(nn.Module):
             probs[:, 0] = gamma * probs[:, 0]
             next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
     
-            next_expr_real = logits_exp            # (B, 1)
+            next_expr_real = logits_exp.contiguous()            # (B, 1)
             bin_next = torch.bucketize(next_expr_real, self.bin_edges)
             bin_next = torch.clamp(bin_next, 0, self.bin_edges.numel() - 1)
     
@@ -523,6 +522,13 @@ class scMulanModel(nn.Module):
             # 7) update inputs
             input_ids = torch.cat([input_ids, input_token_for_next_step], dim=1)
             expression_level = torch.cat([expression_level, expr_bin_for_next_step], dim=1)
+
+            if verbose == True:
+                print(f'next_pred_token: {next_token}, next_token: {input_token_for_next_step}, bin_next: {bin_next},')
+                print(f'input_ids: {input_ids}')
+                print(logits_exp)
+                print(f'expression level: {expression_level}')
+                print('\n')
     
             # 8) stop condition
             if (next_token == 0).all() or predicted_gene_tokens.__len__() >= max_new_tokens:

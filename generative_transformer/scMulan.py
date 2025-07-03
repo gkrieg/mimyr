@@ -465,6 +465,8 @@ class scMulan:
                 prompt_vals_list.append(prompt_vals)
     
             if verbose:
+                print(f' sep id is {sep_id}')
+                print(f'prompt ids are: {prompt_ids_list}')
                 print(f"  Prompt construction took {time.time() - t0:.2f} sec")
     
             # === Target Sequence Construction (optional) ===
@@ -480,6 +482,7 @@ class scMulan:
                     target_vals_list.append(tgt_vals)
                     target_real_vals_list.append(tgt_real_vals)
                 if verbose:
+                    print(f'target tokens are: {target_tokens_list}')
                     print(f"  Target sequence creation took {time.time() - t1:.2f} sec")
     
             # === Tensor Preparation ===
@@ -508,6 +511,9 @@ class scMulan:
                     override_expr_sequence[b, :tlen] = torch.tensor(t_vals, dtype=torch.long, device=self.device)
     
             if verbose:
+                # print(f' input ids are {input_ids}')
+                # print(f' override token sequence is {override_gene_sequence}')
+                print(f'override expression sequence is {override_expr_sequence}')
                 print(f"  Tensor preparation took {time.time() - t2:.2f} sec")
     
             # === Model Call ===
@@ -519,10 +525,11 @@ class scMulan:
                 top_k=top_k,
                 override_gene_sequence=override_gene_sequence if cheat_with_tokens else None,
                 override_expr_sequence=override_expr_sequence if cheat_with_expr else None,
+                verbose=verbose,
                 **generate_kwargs
             )
             if verbose:
-                print(f"  Model generation took {time.time() - t3:.2f} sec")
+                print(f"  Model generation took {time.time() - t3:.2f} secondss")
     
             # === Post-Processing ===
             t4 = time.time()
@@ -573,6 +580,11 @@ class scMulan:
         - Missing genes → 0
         - Duplicates → average over their values
         """
+        if '0' in gene_tokens:
+            stop_idx = gene_tokens.index('0')
+            gene_tokens = gene_tokens[:stop_idx]
+            new_vals = new_vals[:stop_idx]
+            
         # 1) Aggregate values per gene
         agg = {}
         for g, v in zip(gene_tokens, new_vals):
@@ -671,6 +683,7 @@ def model_generate(ckp_path: str,
                     adata: AnnData,
                     meta_info: dict,
                     use_kv_cache: bool=False,
+                    n_express_level: int = 100,
                     **kwargs,
                     ):
     
@@ -679,7 +692,8 @@ def model_generate(ckp_path: str,
     gptconf = MulanConfig(**ckp['model_args'])
     print(gptconf)
     gptconf.vocab_size = len(meta_info['token_set'])
-    bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],gptconf.expression_level)
+    # bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],gptconf.expression_level)
+    bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],n_express_level)
     gptconf.bin_edges = bin_edges
 
     if use_kv_cache == False:
@@ -693,7 +707,7 @@ def model_generate(ckp_path: str,
     # model.half()
     
     tokenizer = scMulanTokenizer(meta_info['token_set'])
-    n_express_level = ckp['model_args']['expression_level']
+    # n_express_level = ckp['model_args']['expression_level']
     model.to('cuda' if torch.cuda.is_available() else 'cpu')
 
     scml = scMulan(adata,meta_info,tokenizer,n_express_level,bin_edges=bin_edges,model=model,**kwargs)

@@ -101,9 +101,11 @@ def main():
         # resize_token_embeddings comes from PreTrainedModel
         model.resize_token_embeddings(len(tokenizer))
         model.config.vocab_size = len(tokenizer)
+        ckp['model_args']['vocab_size'] = len(tokenizer)
         if args.new_expression_size:
             model.resize_expression_embeddings(args.new_expression_size)
             model.config.expression_level = args.new_expression_size
+            ckp['model_args']['expression_level'] = args.new_expression_size
     model.to(device)
 
     print('initialized model', flush=True)
@@ -153,6 +155,7 @@ def main():
         max_len    = args.max_len,
         shuffle    = not args.no_shuffle,
         num_workers= args.num_workers,
+        n_express_level=model.config.expression_level,
         include_0s = False,
         add_xyz_noise = args.xyz_noise,
     )
@@ -164,6 +167,7 @@ def main():
             max_len    = args.max_len,
             shuffle    = False,
             num_workers= args.num_workers,
+            n_express_level=model.config.expression_level,
             include_0s = False,
         )
     else:
