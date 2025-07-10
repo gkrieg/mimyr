@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 import scanpy as sc
 from tqdm import tqdm
 import wandb
+import torch.distributed as dist
 
 root_path = os.path.abspath('/work/magroup/skrieger/scMulan/Tutorials/scMulan')
 sys.path.append(os.path.abspath(root_path))
@@ -71,26 +72,40 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
+    os.environ['NCCL_P2P_DISABLE'] = '1'
+    dist.init_process_group(backend='nccl')
+
+
+    if dist.is_available() and dist.is_initialized():
+        print('using a distributed multi-gpu run\n\n\n')
+        rank = dist.get_rank()
+        local_rank = int(os.environ['LOCAL_RANK'])
+        torch.cuda.set_device(local_rank)
+        device = torch.device('cuda', local_rank)
+    else:
+        rank = 0
+        device = torch.device(args.device)
+
+
 
     # 1) Load pretrained checkpoint
     ckp = torch.load(args.ckp_path, map_location='cpu')
     if args.overwrite_vocab_size is not None:
         ckp['model_args']['vocab_size'] = args.overwrite_vocab_size
         print(f"Overwriting config.vocab_size to {args.overwrite_vocab_size}")
+    if args.new_expression_size is not None and args.from_finetuned:
+        ckp['model_args']['expression_level'] = args.new_expression_size
     gptconf = MulanConfig(**ckp['model_args'])
     ModelClass = scMulanModel
     model = ModelClass(gptconf)
-    device = torch.device(args.device)
-    model.to(device)
-    model.load_state_dict(ckp['model'], strict=False)
+    # device = torch.device(args.device)
+    
+    if args.from_finetuned:
+        model.load_state_dict(ckp['model'], strict=False)
     model.eval()
     model.hidden_dim = ckp['model_args']['n_embd']
 
-    # 2) Load and extend meta_info with coordinate tokens
     meta_info = torch.load(args.meta_info)
-    new_tokens = ["<x>", "<y>", "<z>"]
-    meta_info['token_set'].extend(new_tokens)
-
     print('loaded meta_info')
     
     # 3) Initialize tokenizer and resize model embeddings/output
@@ -106,7 +121,7 @@ def main():
             model.resize_expression_embeddings(args.new_expression_size)
             model.config.expression_level = args.new_expression_size
             ckp['model_args']['expression_level'] = args.new_expression_size
-    model.to(device)
+    
 
     print('initialized model', flush=True)
     # 4) Load AnnData and split into train/validation
@@ -176,19 +191,24 @@ def main():
     # 5) Optimizer
     optimizer = AdamW(model.parameters(), lr=args.lr)
 
+    model.to(device)
+    if dist.is_available() and dist.is_initialized():
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
+
     # 6) Initialize W&B
-    wandb.init(
-        project="scMulan-finetune",
-        name=f'{os.path.basename(args.output_dir)}_bs{args.batch_size}',
-        config={
-            "epochs":       args.epochs,
-            "batch_size":   args.batch_size,
-            "lr":           args.lr,
-            "lambda_val":   args.lambda_val,
-            "val_split":    args.val_split,
-        },
-        dir=args.output_dir,
-    )
+    if rank == 0:
+        wandb.init(
+            project="scMulan-finetune",
+            name=f'{os.path.basename(args.output_dir)}_bs{args.batch_size}',
+            config={
+                "epochs":       args.epochs,
+                "batch_size":   args.batch_size,
+                "lr":           args.lr,
+                "lambda_val":   args.lambda_val,
+                "val_split":    args.val_split,
+            },
+            dir=args.output_dir,
+        )
 
     if args.from_finetuned:
         # e.g. ckp-path ends with ".../epoch3_model.pt"
@@ -201,8 +221,10 @@ def main():
     
     # 7) Training + validation loop
     for epoch in range(start_epoch, args.epochs+1):
+        if hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
         model.train()
-        total_loss, total_cls, total_exp = 0.0, 0.0, 0.0
+        total_loss, total_cls, total_exp_bin, total_exp_real = 0.0, 0.0, 0.0, 0.0
 
         for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch} [train]")):
             input_ids      = batch['input_ids'].to(device)
@@ -215,7 +237,7 @@ def main():
                 labels = labels.to(device)
 
             optimizer.zero_grad()
-            logits_cls, logits_exp, loss, loss_cls, loss_exp = model(
+            logits_cls, logits_exp_bins, logits_exp_real, loss, loss_cls, loss_exp_bin, loss_exp_real = model(
                 idx=input_ids,
                 x_expr=x_expr,
                 targets=labels,
@@ -226,31 +248,38 @@ def main():
             loss.backward()
             optimizer.step()
 
-            total_loss += loss.item()
-            total_cls  += loss_cls.item()
-            total_exp  += loss_exp.item()
+            total_loss   += loss.item() if loss is not None else 0.0
+            total_cls    += loss_cls.item() if loss_cls is not None else 0.0
+            total_exp_bin    += loss_exp_bin.item() if loss_exp_bin is not None else 0.0
+            total_exp_real    += loss_exp_real.item() if loss_exp_real is not None else 0.0
 
-            wandb.log({
-                "train/batch_loss":     loss.item(),
-                "train/batch_loss_cls": loss_cls.item(),
-                "train/batch_loss_exp": loss_exp.item(),
-                "train/step":           (epoch-1)*len(train_loader) + step,
-            })
+            if rank == 0:
+                wandb.log({
+                    "train/batch_loss":     loss.item(),
+                    "train/batch_loss_cls": loss_cls.item(),
+                    "train/batch_loss_exp_bin": loss_exp_bin.item(),
+                    "train/batch_loss_exp_real": loss_exp_real.item(),
+                    "train/step":           (epoch-1)*len(train_loader) + step,
+                })
 
         avg_loss = total_loss / len(train_loader)
         avg_cls  = total_cls  / len(train_loader)
-        avg_exp  = total_exp  / len(train_loader)
-        print(f"Epoch {epoch} — train total {avg_loss:.4f}, cls {avg_cls:.4f}, exp {avg_exp:.4f}")
-        wandb.log({
-            "train/epoch_loss":     avg_loss,
-            "train/epoch_loss_cls": avg_cls,
-            "train/epoch_loss_exp": avg_exp,
-            "epoch":                epoch,
-        })
+        avg_exp_bin  = total_exp_bin  / len(train_loader)
+        avg_exp_real  = total_exp_real  / len(train_loader)
+        print(f"Epoch {epoch} — train total {avg_loss:.4f}, cls {avg_cls:.4f}, exp_bin {avg_exp_bin:.4f}, exp_real {avg_exp_real:.4f}")
+        if rank == 0:
+            wandb.log({
+                "train/epoch_loss":     avg_loss,
+                "train/epoch_loss_cls": avg_cls,
+                "train/epoch_loss_exp_bin": avg_exp_bin,
+                "train/epoch_loss_exp_real": avg_exp_real,
+                "epoch":                epoch,
+            })
 
         if val_loader is not None:
+            torch.cuda.empty_cache()
             model.eval()
-            v_loss, v_cls, v_exp, count = 0.0, 0.0, 0.0, 0
+            v_loss, v_cls, v_exp_bin, v_exp_real, count = 0.0, 0.0, 0.0, 0.0, 0
             with torch.no_grad():
                 for batch in tqdm(val_loader, desc=f"Epoch {epoch} [val]"):
                     input_ids      = batch['input_ids'].to(device)
@@ -262,7 +291,7 @@ def main():
                     if labels is not None:
                         labels = labels.to(device)
 
-                    _, _, l, lc, le = model(
+                    _, _, _, l, lc, leb, ler = model(
                         idx=input_ids,
                         x_expr=x_expr,
                         targets=labels,
@@ -272,32 +301,42 @@ def main():
                     )
                     v_loss += l.item()
                     v_cls  += lc.item()
-                    v_exp  += le.item()
+                    v_exp_bin  += leb.item()
+                    v_exp_real  += ler.item()
                     count  += 1
 
             avg_v_loss = v_loss / count
             avg_v_cls  = v_cls  / count
-            avg_v_exp  = v_exp  / count
-            print(f"Epoch {epoch} — valid total {avg_v_loss:.4f}, cls {avg_v_cls:.4f}, exp {avg_v_exp:.4f}")
-            wandb.log({
-                "valid/epoch_loss":     avg_v_loss,
-                "valid/epoch_loss_cls": avg_v_cls,
-                "valid/epoch_loss_exp": avg_v_exp,
-                "epoch":                epoch,
-            })
+            avg_v_exp_bin  = v_exp_bin  / count
+            avg_v_exp_real  = v_exp_real  / count
+            print(f"Epoch {epoch} — valid total {avg_v_loss:.4f}, cls {avg_v_cls:.4f}, exp {avg_v_exp_bin:.4f}")
+            if rank == 0:
+                wandb.log({
+                    "valid/epoch_loss":     avg_v_loss,
+                    "valid/epoch_loss_cls": avg_v_cls,
+                    "valid/epoch_loss_exp_bin": avg_v_exp_bin,
+                    "valid/epoch_loss_exp_real": avg_v_exp_real,
+                    "epoch":                epoch,
+                })
 
         # Save epoch checkpoint
-        if epoch % args.save_frequency == 0:
+        if epoch % args.save_frequency == 0 and rank == 0:
             ckpt_file = os.path.join(args.output_dir, f"epoch{epoch}_model.pt")
-            torch.save({'model': model.state_dict(),
-                        'model_args': ckp['model_args']}, ckpt_file)
+            if dist.is_available() and dist.is_initialized():
+                torch.save({'model': model.module.state_dict(),
+                            'model_args': ckp['model_args']}, ckpt_file)
+            else:
+                torch.save({'model': model.state_dict(),
+                            'model_args': ckp['model_args']}, ckpt_file)
 
     # 8) Save final artifacts
     # model.save_pretrained(args.output_dir)
     MulanConfig(**ckp['model_args']).save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
     print(f"Finetuned artifacts written to {args.output_dir}")
-    wandb.finish()
+    if rank == 0:
+        wandb.finish()
+    dist.destroy_process_group()
 
 if __name__ == "__main__":
     main()

@@ -9,7 +9,8 @@ from typing import Tuple, List
 
 import pandas as pd
 import numpy as np
-
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
 
 
 class _AnndataGenDataset(Dataset):
@@ -63,8 +64,9 @@ class _AnndataGenDataset(Dataset):
 
 
         if len(ids) > self.max_len:
-            ids = ids[: self.max_len]
-            vals = vals[:self.max_len]
+            ids = ids[: self.max_len - 1] + self.tok.encode(['<E>'])
+            vals = vals[:self.max_len - 1] + [0]
+            target_real_vals = target_real_vals[:self.max_len - 1] + [0]
         pad_len = self.max_len - len(ids)
         ids += [self.tok.pad_token_id] * pad_len
         vals += [0] * pad_len
@@ -73,13 +75,16 @@ class _AnndataGenDataset(Dataset):
         # 5) labels: ignore prompt
         labels = [-100] * len(prompt_tokens) + target_tokens + self.tok.encode(['<E>'])
         if len(labels) > self.max_len:
-            labels = labels[: self.max_len]
+            labels = labels[: self.max_len - 1] + self.tok.encode(['<E>'])
         labels += [-100] * (self.max_len - len(labels))
         # ids += [-100] * (self.max_len - len(ids))
         # vals += [-100] * (self.max_len - len(vals))
 
         # 6) attention mask
         mask = [1 if i != self.tok.pad_token_id else 0 for i in ids]
+        assert len(labels) <= self.max_len
+        assert len(ids) <= self.max_len
+        assert len(vals) <= self.max_len
 
 
         input_ids   = torch.tensor(ids,   dtype=torch.long).clone()
@@ -151,10 +156,16 @@ def get_generation_dataloader(
     )
 
     # 3) dataloader
+    if dist.is_available() and dist.is_initialized():
+        sampler = DistributedSampler(ds)
+    else:
+        sampler = None
+        
     return DataLoader(
         ds,
         batch_size  = batch_size,
-        shuffle     = shuffle,
+        shuffle=(sampler is None and shuffle),  # only shuffle if no sampler
+        sampler     = sampler,
         num_workers = num_workers,
         pin_memory  = True,
     )

@@ -117,13 +117,22 @@ class scMulanModel(nn.Module):
         ))
             
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.epx_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # expr level
+        # self.epx_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # expr level
+
+        # self.epx_regressor = nn.Sequential(
+        #     nn.Linear(config.vocab_size, config.n_embd),  # map vocab→hidden
+        #     nn.ReLU(),
+        #     nn.Linear(config.n_embd, 1)                   # hidden→scalar
+        # )
+
+        self.epx_head = nn.Linear(config.n_embd, config.expression_level + 1, bias=False)  # +1 for 0 bin
 
         self.epx_regressor = nn.Sequential(
-            nn.Linear(config.vocab_size, config.n_embd),  # map vocab→hidden
+            nn.Linear(config.expression_level + 1, config.n_embd),  # map bin logits → hidden
             nn.ReLU(),
-            nn.Linear(config.n_embd, 1)                   # hidden→scalar
+            nn.Linear(config.n_embd, 1)  # hidden → real
         )
+
 
         if 'LOCAL_RANK' not in os.environ or os.environ['LOCAL_RANK'] == '0':
             logger.info("number of parameters: %.2fM" % (self.get_num_params()/1e6,))
@@ -161,20 +170,20 @@ class scMulanModel(nn.Module):
             new_head.weight[:old_num].copy_(old_head)
         self.lm_head = new_head
 
-        old_head2 = self.epx_head.weight.data  # shape (old_num, emb_dim)
-        new_head2 = nn.Linear(emb_dim, new_num_tokens, bias=False)
-        with torch.no_grad():
-            new_head2.weight[:old_num].copy_(old_head2)
-        self.epx_head = new_head2
+        # old_head2 = self.epx_head.weight.data  # shape (old_num, emb_dim)
+        # new_head2 = nn.Linear(emb_dim, new_num_tokens, bias=False)
+        # with torch.no_grad():
+        #     new_head2.weight[:old_num].copy_(old_head2)
+        # self.epx_head = new_head2
 
         # 3) Update config
         self.config.vocab_size = new_num_tokens
 
-        self.epx_regressor = nn.Sequential(
-                nn.Linear(self.config.vocab_size, self.config.n_embd),  # map vocab→hidden
-                nn.ReLU(),
-                nn.Linear(self.config.n_embd, 1)                   # hidden→scalar
-            )
+        # self.epx_regressor = nn.Sequential(
+        #         nn.Linear(self.config.vocab_size, self.config.n_embd),  # map vocab→hidden
+        #         nn.ReLU(),
+        #         nn.Linear(self.config.n_embd, 1)                   # hidden→scalar
+        #     )
 
     def resize_expression_embeddings(self, new_expression_level: int):
         """
@@ -199,6 +208,15 @@ class scMulanModel(nn.Module):
 
         # 2) update config so that later calls (or re-initializations) know the new max
         self.config.expression_level = new_expression_level
+
+        self.epx_head = nn.Linear(emb_dim, new_num, bias=False)
+
+        self.epx_regressor = nn.Sequential(
+            nn.Linear(new_num, self.config.n_embd),  # map new bin logits → hidden
+            nn.ReLU(),
+            nn.Linear(self.config.n_embd, 1)
+        )
+
 
     def forward(self, 
                 idx=None,
@@ -227,10 +245,13 @@ class scMulanModel(nn.Module):
         x = self.transformer.ln_f(x)
 
         logits_labels = self.lm_head(x) 
-        logits_exp = self.epx_head(x).squeeze(-1)
+        # logits_exp = self.epx_head(x).squeeze(-1)
+        logits_exp_bins = self.epx_head(x)                    # (B, T, num_bins)
+        logits_exp_real = self.epx_regressor(logits_exp_bins) # (B, T, 1)
         loss = None
         loss_cls = None
         loss_exp = None
+        loss_exp_bin = None
         
        
         # 2) Classification loss over all tokens (causal shift)
@@ -245,42 +266,70 @@ class scMulanModel(nn.Module):
                 ignore_index=-100
             )
 
-        B, T, V = logits_exp.size()
-        flat_exp = logits_exp.view(-1, V)             # (B*T, V)
-        flat_reg = self.epx_regressor(flat_exp)       # (B*T, 1)
-        logits_reg = flat_reg.view(B, T, 1)           # (B, T, 1)
+        
+        if y_expr is not None:
+            B, T, V = logits_exp_bins.shape
+            x_expr_masked = x_expr.clone()
+            x_expr_masked[targets == -100] = -100
+
+            shift_exp_logits = logits_exp_bins[:, :-1, :].reshape(-1, V) 
+            shift_exp_labels = x_expr_masked[:, 1:].reshape(-1)  
+            loss_exp_bin = F.cross_entropy(shift_exp_logits, shift_exp_labels, ignore_index=-100)
+
+        loss_exp_real = None
+        if y_expr is not None:
+            pred_vals = logits_exp_real.squeeze(-1)
+            true_vals = y_expr.squeeze(-1) if y_expr.dim() == 3 else y_expr
+        
+            shift_pred = pred_vals[:, :-1].contiguous()
+            shift_true = true_vals[:, 1:].contiguous()
+            loss_exp_real = F.mse_loss(shift_pred, shift_true, reduction='mean')
+
+
+        # B, T, V = logits_exp.size()
+        # flat_exp = logits_exp.view(-1, V)             # (B*T, V)
+        # flat_reg = self.epx_regressor(flat_exp)       # (B*T, 1)
+        # logits_reg = flat_reg.view(B, T, 1)           # (B, T, 1)
 
         # 3) Expression loss over all tokens (aligned or shifted as needed)
-        if y_expr is not None:
-            # If you want causal‐style (predict y_expr[:,t] from x[:,t-1]):
-            #   pred_vals = logits_exp[:, :-1].reshape(-1)
-            #   true_vals = y_expr[:, 1:].reshape(-1)
-            # Otherwise, to predict at each position:
+        # if y_expr is not None:
+        #     # If you want causal‐style (predict y_expr[:,t] from x[:,t-1]):
+        #     #   pred_vals = logits_exp[:, :-1].reshape(-1)
+        #     #   true_vals = y_expr[:, 1:].reshape(-1)
+        #     # Otherwise, to predict at each position:
 
-            pred_vals = logits_reg.squeeze(-1)
-            shift_pred = pred_vals[:,:-1].contiguous()
-            # true_vals: ensure same shape
-            true_vals = y_expr.squeeze(-1) if y_expr.dim()==3 else y_expr
-            shift_true = true_vals[:,1:].contiguous()
+        #     pred_vals = logits_reg.squeeze(-1)
+        #     shift_pred = pred_vals[:,:-1].contiguous()
+        #     # true_vals: ensure same shape
+        #     true_vals = y_expr.squeeze(-1) if y_expr.dim()==3 else y_expr
+        #     shift_true = true_vals[:,1:].contiguous()
 
-            flat_pred = shift_pred.view(-1)
-            flat_true = shift_true.view(-1)
+        #     flat_pred = shift_pred.view(-1)
+        #     flat_true = shift_true.view(-1)
             
-            loss_exp = F.mse_loss(pred_vals, true_vals, reduction='mean')
+        #     loss_exp = F.mse_loss(pred_vals, true_vals, reduction='mean')
 
 
-        if (loss_cls is not None) and (loss_exp is not None):
-            loss = loss_cls + lambda_val * loss_exp
+        # if (loss_cls is not None) and (loss_exp is not None):
+        #     loss = loss_cls + lambda_val * loss_exp
+        # elif loss_cls is not None:
+        #     loss = loss_cls
+        # elif loss_exp is not None:
+        #     loss = lambda_val * loss_exp
+
+        if (loss_cls is not None) and (loss_exp_real is not None) and (loss_exp_bin is not None):
+            loss = loss_cls + lambda_val * (loss_exp_real + loss_exp_bin)
         elif loss_cls is not None:
             loss = loss_cls
-        elif loss_exp is not None:
-            loss = lambda_val * loss_exp
+        elif loss_exp_real is not None and loss_exp_bin is not None:
+            loss = lambda_val * (loss_exp_real + loss_exp_bin)
+
 
 
         if return_hidden:
-            return logits_labels, logits_reg, x
+            return logits_labels, logits_exp_bins, logits_exp_real, x
         else:
-            return logits_labels, logits_reg, loss, loss_cls, loss_exp
+            return logits_labels, logits_exp_bins, logits_exp_real, loss, loss_cls, loss_exp_bin, loss_exp_real
 
 
 
@@ -457,20 +506,24 @@ class scMulanModel(nn.Module):
         predicted_gene_tokens = []
         predicted_expression_bins = []
         predicted_real_expr = []
+
+        B = input_ids.size(0)
+        finished = torch.zeros(B, dtype=torch.bool, device=input_ids.device)
+
     
         while True:
             step_idx = input_ids.size(1)
     
             # 1) model forward
             if return_hidden:
-                logits_cls, logits_exp, hidden = self(
+                logits_cls, logits_exp_bins, logits_exp_real, hidden = self(
                     idx=input_ids,
                     x_expr=expression_level,
                     return_hidden=True
                 )
                 hidden_states += (hidden,)
             else:
-                logits_cls, logits_exp, _, _, _ = self(
+                logits_cls, logits_exp_bins, logits_exp_real, _, _, _, _ = self(
                     idx=input_ids,
                     x_expr=expression_level
                 )
@@ -478,7 +531,11 @@ class scMulanModel(nn.Module):
                 predicted_token_ids = torch.argmax(logits_cls, dim=-1)
                 print(f'predicted token ids: {predicted_token_ids}')
             logits_cls = logits_cls[:, -1, :]      # (B, vocab)
-            logits_exp = logits_exp[:, -1].float() # (B,)
+            logits_exp_bins = logits_exp_bins[:, -1, :]  # (B, num_bins)
+            logits_exp_real = logits_exp_real[:, -1].float()  # (B, 1)
+            
+            
+
     
             # 2) mask invalid tokens
             if ignore_Idx is not None:
@@ -498,10 +555,14 @@ class scMulanModel(nn.Module):
             probs = F.softmax(logits_cls, dim=-1)
             probs[:, 0] = gamma * probs[:, 0]
             next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
+            
+            # Mark items that have generated EOS (0)
+            newly_finished = (next_token.squeeze(1) == 0)
+            finished |= newly_finished
+
     
-            next_expr_real = logits_exp.contiguous()            # (B, 1)
-            bin_next = torch.bucketize(next_expr_real, self.bin_edges)
-            bin_next = torch.clamp(bin_next, 0, self.bin_edges.numel() - 1)
+            next_expr_real = logits_exp_real.contiguous()            # (B, 1)
+            bin_next = torch.argmax(logits_exp_bins, dim=-1, keepdim=True)  # (B, 1)
     
             # 5) record model predictions
             predicted_gene_tokens.append(next_token)
@@ -531,8 +592,9 @@ class scMulanModel(nn.Module):
                 print('\n')
     
             # 8) stop condition
-            if (next_token == 0).all() or predicted_gene_tokens.__len__() >= max_new_tokens:
+            if finished.all() or predicted_gene_tokens.__len__() >= max_new_tokens:
                 break
+
     
         # concatenate predicted sequences
         predicted_gene_tokens = torch.cat(predicted_gene_tokens, dim=1)         # (B, T)

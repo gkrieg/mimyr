@@ -120,10 +120,10 @@ class scMulanModel_kv(nn.Module):
         ))
             
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        self.epx_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # expr level
+        self.epx_head = nn.Linear(config.n_embd, config.expression_level + 1, bias=False) # expr level
 
         self.epx_regressor = nn.Sequential(
-            nn.Linear(config.vocab_size, config.n_embd),  # map vocab→hidden
+            nn.Linear(config.expression_level + 1, config.n_embd),  # map vocab→hidden
             nn.ReLU(),
             nn.Linear(config.n_embd, 1)                   # hidden→scalar
         )
@@ -187,20 +187,20 @@ class scMulanModel_kv(nn.Module):
             new_head.weight[:old_num].copy_(old_head)
         self.lm_head = new_head
 
-        old_head2 = self.epx_head.weight.data  # shape (old_num, emb_dim)
-        new_head2 = nn.Linear(emb_dim, new_num_tokens, bias=False)
-        with torch.no_grad():
-            new_head2.weight[:old_num].copy_(old_head2)
-        self.epx_head = new_head2
+        # old_head2 = self.epx_head.weight.data  # shape (old_num, emb_dim)
+        # new_head2 = nn.Linear(emb_dim, new_num_tokens, bias=False)
+        # with torch.no_grad():
+        #     new_head2.weight[:old_num].copy_(old_head2)
+        # self.epx_head = new_head2
 
         # 3) Update config
         self.config.vocab_size = new_num_tokens
 
-        self.epx_regressor = nn.Sequential(
-                nn.Linear(self.config.vocab_size, self.config.n_embd),  # map vocab→hidden
-                nn.ReLU(),
-                nn.Linear(self.config.n_embd, 1)                   # hidden→scalar
-            )
+        # self.epx_regressor = nn.Sequential(
+        #         nn.Linear(self.config.vocab_size, self.config.n_embd),  # map vocab→hidden
+        #         nn.ReLU(),
+        #         nn.Linear(self.config.n_embd, 1)                   # hidden→scalar
+        #     )
 
     def resize_expression_embeddings(self, new_expression_level: int):
         """
@@ -226,6 +226,14 @@ class scMulanModel_kv(nn.Module):
         # 2) update config so that later calls (or re-initializations) know the new max
         self.config.expression_level = new_expression_level
 
+        self.epx_head = nn.Linear(emb_dim, new_num, bias=False)
+
+        self.epx_regressor = nn.Sequential(
+            nn.Linear(new_num, self.config.n_embd),  # map new bin logits → hidden
+            nn.ReLU(),
+            nn.Linear(self.config.n_embd, 1)
+        )
+
     def forward(self, idx=None, inputs_embeds=None, past_key_values=None, x_expr=None, return_hidden=False):
         if past_key_values is None:
             past_key_values = [None] * len(self.transformer.h)
@@ -246,14 +254,10 @@ class scMulanModel_kv(nn.Module):
         x = self.transformer.ln_f(x)
 
         logits_labels = self.lm_head(x)
-        logits_exp = self.epx_head(x)
+        logits_exp_bins = self.epx_head(x)
+        logits_exp_real = self.epx_regressor(logits_exp_bins) # (B, T, 1)
 
-        B, T, V = logits_exp.size()
-        flat_exp = logits_exp.view(-1, V)             # (B*T, V)
-        flat_reg = self.epx_regressor(flat_exp)       # (B*T, 1)
-        logits_reg = flat_reg.view(B, T, 1)           # (B, T, 1)
-
-        return logits_labels, logits_reg, tuple(presents_kv)
+        return logits_labels, logits_exp_bins, logits_exp_real, tuple(presents_kv)
 
     @torch.no_grad()
     def generate_cellGenesis(self, input_ids, expression_level, max_new_tokens, ignore_Idx=None, top_k=None, gamma=1.0, override_gene_sequence=None, override_expr_sequence=None, verbose=False):
@@ -266,11 +270,21 @@ class scMulanModel_kv(nn.Module):
         predicted_expression_bins = []
         predicted_real_expr = []
 
+        B = input_ids.size(0)
+        finished = torch.zeros(B, dtype=torch.bool, device=input_ids.device)
+
+        first_time = True
+
         while output_idx.shape[1] < max_new_tokens:
-            logits_cls, logits_exp, past_key_values = self(idx=output_idx[:, -1:], x_expr=output_expr[:, -1:], past_key_values=past_key_values)
+            if first_time == True:
+                logits_cls, logits_exp_bins, logits_exp_real, past_key_values = self(idx=input_ids, x_expr=expression_level, past_key_values=past_key_values)
+                first_time = False
+            else:
+                logits_cls, logits_exp_bins, logits_exp_real, past_key_values = self(idx=output_idx[:, -1:], x_expr=output_expr[:, -1:], past_key_values=past_key_values)
             
             logits_cls = logits_cls[:, -1, :]
-            logits_exp = logits_exp[:, -1].float() # (B,)
+            logits_exp_bins = logits_exp_bins[:, -1, :]
+            logits_exp_real = logits_exp_real[:, -1].float()
 
             if ignore_Idx is not None:
                 logits_cls[:, ignore_Idx] = float('-inf')
@@ -286,9 +300,12 @@ class scMulanModel_kv(nn.Module):
             probs[:, 0] *= gamma
             next_token = torch.multinomial(probs, num_samples=1)
 
-            next_expr_real = logits_exp
-            bin_next = torch.bucketize(next_expr_real, self.bin_edges)
-            bin_next = torch.clamp(bin_next, 0, self.bin_edges.numel() - 1)
+            # Mark items that have generated EOS (0)
+            newly_finished = (next_token.squeeze(1) == 0)
+            finished |= newly_finished
+
+            next_expr_real = logits_exp_real
+            bin_next = torch.argmax(logits_exp_bins, dim=-1, keepdim=True)  # (B, 1)
 
             predicted_gene_tokens.append(next_token)
             predicted_expression_bins.append(bin_next)
@@ -310,7 +327,7 @@ class scMulanModel_kv(nn.Module):
             output_expr = torch.cat([output_expr, next_expr_input], dim=1)
             real_expr = torch.cat([real_expr, next_expr_real], dim=1)
 
-            if (next_token == 0).all():
+            if finished.all():
                 break
 
         predicted_gene_tokens = torch.cat(predicted_gene_tokens, dim=1)
