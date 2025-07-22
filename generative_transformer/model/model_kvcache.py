@@ -296,9 +296,26 @@ class scMulanModel_kv(nn.Module):
                 v, _ = torch.topk(logits_cls, min(top_k, logits_cls.size(-1)), dim=-1)
                 logits_cls[logits_cls < v[:, [-1]]] = float('-inf')
 
+            # probs = F.softmax(logits_cls, dim=-1)
+            # probs[:, 0] *= gamma
+            # next_token = torch.multinomial(probs, num_samples=1)
+            
+            eos_id = 0
+            eos_threshold = 0.95  # or 0.95
             probs = F.softmax(logits_cls, dim=-1)
-            probs[:, 0] *= gamma
-            next_token = torch.multinomial(probs, num_samples=1)
+            forced_eos = probs[:, eos_id] >= eos_threshold
+            
+            # Sample as usual
+            sampled_tokens = torch.multinomial(probs, num_samples=1)
+            
+            # Overwrite with EOS where forced
+            next_token = torch.where(
+                forced_eos.unsqueeze(1),  # shape (batch_size, 1)
+                torch.full_like(sampled_tokens, eos_id),
+                sampled_tokens
+            )
+
+
 
             # Mark items that have generated EOS (0)
             newly_finished = (next_token.squeeze(1) == 0)

@@ -73,26 +73,50 @@ class scMulan:
         # else:pass
             #print('adata is not sparse, use dense matrix and dataframe')
             # self.adata_matrix = self.adata.X.toarray()
-        cellDFHVG = pd.DataFrame(self.adata.X.toarray(), columns = self.mulan_gene_set)
-        cellDFHVG.index = list(self.adata.obs.index)
-        self.adata_matrix = cellDFHVG
+        
+        # cellDFHVG = pd.DataFrame(self.adata.X.toarray(), columns = self.mulan_gene_set)
+        # cellDFHVG.index = list(self.adata.obs.index)
+        # self.adata_matrix = cellDFHVG
+        
+        self.adata_matrix = self.adata.X
 
         
 
 
+    # def get_gene_expression_dict(self, i, matrix):
+    #     genes_series = matrix.iloc[i]
+    #     expressed_genes = genes_series[genes_series > 0].index.tolist()
+    #     expr_values = genes_series[expressed_genes].values
+    #     cell_expression_dict = {gene: expr_value for gene, expr_value in zip(expressed_genes, expr_values)}
+    #     return cell_expression_dict
+
     def get_gene_expression_dict(self, i, matrix):
-        genes_series = matrix.iloc[i]
-        expressed_genes = genes_series[genes_series > 0].index.tolist()
-        expr_values = genes_series[expressed_genes].values
-        cell_expression_dict = {gene: expr_value for gene, expr_value in zip(expressed_genes, expr_values)}
-        return cell_expression_dict
+        if scipy.sparse.issparse(matrix):
+            row = matrix.getrow(i).toarray().ravel()
+        else:
+            row = matrix[i]
+        expressed_idx = np.where(row > 0)[0]
+        expressed_genes = np.array(self.mulan_gene_set)[expressed_idx]
+        expr_values = row[expressed_idx]
+        return dict(zip(expressed_genes, expr_values))
+
+
+    # def get_gene_expression_dict_with_0s(self, i, matrix):
+    #     genes_series = matrix.iloc[i]
+    #     expressed_genes = genes_series.index.tolist()
+    #     expr_values = genes_series.values
+    #     cell_expression_dict = {gene: expr_value for gene, expr_value in zip(expressed_genes, expr_values)}
+    #     return cell_expression_dict
 
     def get_gene_expression_dict_with_0s(self, i, matrix):
-        genes_series = matrix.iloc[i]
-        expressed_genes = genes_series.index.tolist()
-        expr_values = genes_series.values
-        cell_expression_dict = {gene: expr_value for gene, expr_value in zip(expressed_genes, expr_values)}
-        return cell_expression_dict
+        if scipy.sparse.issparse(matrix):
+            row = matrix.getrow(i).toarray().ravel()
+        else:
+            row = matrix[i]
+        expressed_genes = self.mulan_gene_set
+        expr_values = row
+        return dict(zip(expressed_genes, expr_values))
+
 
     def prepare_gene_expression_codings(self, i, matrix, include_0s=False):
         # 1) build the dict of gene→expr, possibly including zeros
@@ -546,6 +570,7 @@ class scMulan:
                 row = self.tokens_and_vals_to_expression_row(
                     var_names=self.adata.var_names.tolist(),
                     gene_tokens=gene_tokens,
+                    gene_tokens_int=gen_seq,
                     new_vals=new_vals,
                     return_series=False
                 )
@@ -570,6 +595,7 @@ class scMulan:
         self,
         var_names: List[str],
         gene_tokens: List[str],
+        gene_tokens_int: List[int],
         new_vals: List[float],
         return_series: bool = False
     ) -> Union[np.ndarray, pd.Series]:
@@ -580,10 +606,35 @@ class scMulan:
         - Missing genes → 0
         - Duplicates → average over their values
         """
-        if '0' in gene_tokens:
-            stop_idx = gene_tokens.index('0')
-            gene_tokens = gene_tokens[:stop_idx]
-            new_vals = new_vals[:stop_idx]
+
+        # Convert gene_tokens to integers if they are strings
+        # gene_tokens_int = [int(tok) for tok in gene_tokens]
+        
+        cut_idx = None
+        seen_below_200 = False
+        
+        for i in range(1, len(gene_tokens_int)):
+            curr_tok = gene_tokens_int[i]
+            prev_tok = gene_tokens_int[i - 1]
+        
+            if curr_tok < 200:
+                seen_below_200 = True
+        
+            if seen_below_200:
+                if curr_tok > prev_tok:
+                    cut_idx = i
+                    break
+        
+        if cut_idx is not None:
+            gene_tokens = gene_tokens[:cut_idx]
+            new_vals = new_vals[:cut_idx]
+
+        # if '0' in gene_tokens:
+        #     stop_idx = gene_tokens.index('0')
+        #     gene_tokens = gene_tokens[:stop_idx]
+        #     new_vals = new_vals[:stop_idx]
+
+        
             
         # 1) Aggregate values per gene
         agg = {}
@@ -625,7 +676,10 @@ class scMulan:
         count = len(adata_var.intersection(mulan_geneset))
         assert count == len(self.meta_info['gene_set']), f'🚫 Please make sure adata is processed with uniformed gene symbol, your gene set has {count} overlap with scMulan.'
         # use mulan gene set
-        self.adata = adata[:,self.mulan_gene_set].copy()
+        # self.adata = adata[:,self.mulan_gene_set].copy()
+        self.adata = adata
+        indices = [self.adata.var_names.get_loc(g) for g in self.mulan_gene_set]
+        self.adata._inplace_subset_var(indices)
         print('✅ adata passed check')
         print("👸 scMulan is ready")
         
@@ -688,7 +742,7 @@ def model_generate(ckp_path: str,
                     ):
     
     ckp = torch.load(ckp_path, map_location='cpu')
-    ckp['model_args']['expression_level'] = 100
+    # ckp['model_args']['expression_level'] = 100
     gptconf = MulanConfig(**ckp['model_args'])
     print(gptconf)
     gptconf.vocab_size = len(meta_info['token_set'])
@@ -801,6 +855,43 @@ def generate_prompt_for_cg(
 
     return prompt_ids, prompt_vals    
 
+# def compute_global_bin_edges(
+#     adata: AnnData,
+#     mulan_gene_set: List,
+#     n_express_level: int,
+#     include_0s: bool = False
+# ) -> np.ndarray:
+#     """
+#     Scan your entire expression matrix to find the global min/max of all
+#     positive (or optionally zero‐included) values, then build
+#     self.n_express_level bins.
+
+#     Stores the result in self.bin_edges of length (n_bins+1).
+#     """
+#     adata_var = set(adata.var_names.tolist())
+#     adata = adata[:,mulan_gene_set]
+#     cellDFHVG = pd.DataFrame(adata.X.toarray(), columns = mulan_gene_set)
+#     cellDFHVG.index = list(adata.obs.index)
+#     adata_matrix = cellDFHVG
+#     # Flatten all values (optionally including zeros)
+#     if include_0s:
+#         vals = adata_matrix.values.ravel()
+#     else:
+#         # only positives
+#         vals = adata_matrix.values.ravel()
+#         vals = vals[vals > 0]
+
+#     if len(vals) == 0:
+#         raise ValueError("No positive expression values found to build edges")
+
+#     # compute uniform edges
+#     min_val = vals.min()
+#     max_val = vals.max()
+#     # +1 so that digitize returns 1..n_bins for positives
+#     edges = np.linspace(min_val, max_val, n_express_level + 1)
+    
+#     return edges
+        
 def compute_global_bin_edges(
     adata: AnnData,
     mulan_gene_set: List,
@@ -815,34 +906,21 @@ def compute_global_bin_edges(
     Stores the result in self.bin_edges of length (n_bins+1).
     """
     adata_var = set(adata.var_names.tolist())
-    adata = adata[:,mulan_gene_set]
-    cellDFHVG = pd.DataFrame(adata.X.toarray(), columns = mulan_gene_set)
-    cellDFHVG.index = list(adata.obs.index)
-    adata_matrix = cellDFHVG
-    # Flatten all values (optionally including zeros)
-    if include_0s:
-        vals = adata_matrix.values.ravel()
+    adata2 = adata[:, mulan_gene_set]  # subsetted AnnData
+
+    X = adata2.X
+    if scipy.sparse.issparse(X):
+        vals = X.data  # only nonzero values
     else:
-        # only positives
-        vals = adata_matrix.values.ravel()
+        vals = X.ravel()
+
+    if not include_0s:
         vals = vals[vals > 0]
 
     if len(vals) == 0:
         raise ValueError("No positive expression values found to build edges")
 
-    # compute uniform edges
     min_val = vals.min()
     max_val = vals.max()
-    # +1 so that digitize returns 1..n_bins for positives
     edges = np.linspace(min_val, max_val, n_express_level + 1)
-    
     return edges
-        
-
-    
-
-
-
-    
-
-        

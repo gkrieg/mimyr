@@ -18,6 +18,8 @@ import scanpy as sc
 from tqdm import tqdm
 import wandb
 import torch.distributed as dist
+import scipy.sparse as sp
+import pandas as pd
 
 root_path = os.path.abspath('/work/magroup/skrieger/scMulan/Tutorials/scMulan')
 sys.path.append(os.path.abspath(root_path))
@@ -69,11 +71,14 @@ def main():
                         help="If set, overwrite the model and config n_expression_level to this value")
     parser.add_argument("--xyz-noise",    action="store_true",
                         help="Whether to add noise to x,y,z coordinates during training")
+    parser.add_argument("--slice-nums", nargs='+',type=int, default=None,
+                        help='List of slice IDs for spatial mouse brain atlases')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     os.environ['NCCL_P2P_DISABLE'] = '1'
-    dist.init_process_group(backend='nccl')
+    if dist.is_available() and int(os.environ.get("WORLD_SIZE", 1)) > 1:
+        dist.init_process_group(backend='nccl')
 
 
     if dist.is_available() and dist.is_initialized():
@@ -127,6 +132,12 @@ def main():
     # 4) Load AnnData and split into train/validation
     adata = sc.read_h5ad(args.adata)
 
+    if args.slice_nums is not None:
+        slice_names = [f'C57BL6J-638850.{s}' for s in args.slice_nums]
+        obs_in_slices = adata.obs_names[adata.obs['brain_section_label'].isin(slice_names)]
+        adata._inplace_subset_obs(adata.obs['brain_section_label'].isin(slice_names))
+        print(f'Subsetted adata to only contain {args.slice_nums} slices giving {adata}')
+
     # Add genes for mulan gene set
     existing_genes = adata.var_names.tolist()
     
@@ -137,17 +148,24 @@ def main():
     
     if len(new_genes) > 0:
         n_obs = adata.n_obs
+        n_new_vars = len(new_genes)
+    
+        new_vars = pd.DataFrame(index=new_genes)
+        new_var = pd.concat([adata.var, new_vars], axis=0)
+        
+    
         if sp.issparse(adata.X):
-            new_data = sp.csr_matrix((n_obs, len(new_genes)))
-            adata.X = sp.hstack([adata.X, new_data], format='csr')
+            new_data = sp.csr_matrix((n_obs, n_new_vars))
+            X = sp.hstack([adata.X, new_data], format='csr')
         else:
-            new_data = np.zeros((n_obs, len(new_genes)))
-            adata.X = np.hstack([adata.X, new_data])
-    
-        new_var = pd.DataFrame(index=new_genes)
-        adata.var = adata.var.join(new_var)
-    
-        adata.var_names_make_unique()
+            new_data = np.zeros((n_obs, n_new_vars))
+            X = np.hstack([adata.X, new_data])
+
+        new_adata = sc.AnnData(X=X, var=new_var, obs=adata.obs, obsm=adata.obsm, uns=adata.uns)
+        new_adata.var_names_make_unique()
+        del adata
+        adata = new_adata
+
     
     print('adata loaded')
     n_cells = adata.n_obs
