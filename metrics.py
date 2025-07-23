@@ -67,7 +67,7 @@ def soft_accuracy(gt_celltypes, gt_positions, pred_celltypes, pred_positions, ra
         samples=gt_positions
 
 
-    for i, pos in tqdm.tqdm(list(enumerate(samples))):
+    for i, pos in tqdm(list(enumerate(samples))):
         if k>0:
             gt_distances, gt_indices = gt_tree.query(pos, k=k+1)
             pred_distances, pred_indices = pred_tree.query(pos, k=k+1)
@@ -113,7 +113,7 @@ def diversity(gt_celltypes, gt_positions, radius):
 
     gt_tree = cKDTree(gt_positions)
     result = []
-    for i, pos in tqdm.tqdm(list(enumerate(gt_positions))):
+    for i, pos in tqdm(list(enumerate(gt_positions))):
         gt_neighbors = gt_tree.query_ball_point(pos, radius)
 
         gt_encoding_sum = np.sum([encoding_dict[gt_celltypes[j]] for j in gt_neighbors], axis=0)
@@ -156,7 +156,7 @@ def soft_correlation(gt_expressions, gt_positions, pred_expressions, pred_positi
     else:
         samples = gt_positions
 
-    for i, pos in tqdm.tqdm(list(enumerate(samples))):
+    for i, pos in tqdm(list(enumerate(samples))):
         if k > 0:
             gt_distances, gt_indices = gt_tree.query(pos, k=k+1)
             pred_distances, pred_indices = pred_tree.query(pos, k=k+1)
@@ -183,6 +183,66 @@ def soft_correlation(gt_expressions, gt_positions, pred_expressions, pred_positi
 
     correlation, _ = pearsonr(gt_sums, pred_sums)
     return correlation
+
+
+import numpy as np
+from scipy.spatial import cKDTree
+import tqdm
+
+def soft_precision(gt_expressions, gt_positions, pred_expressions, pred_positions, radius=None, k=0, sample=None):
+    """
+    gt_expressions, pred_expressions: array of shape [num_cells, num_genes]
+    gt_positions, pred_positions: array of shape [num_cells, 2] or [num_cells, 3]
+    radius: radius for neighbor search (if k=0)
+    k: number of neighbors to consider (if k>0)
+    sample: if provided, percentage of gt_positions to sample
+    """
+    gt_positions = np.asarray(gt_positions)
+    pred_positions = np.asarray(pred_positions)
+    gt_expressions = np.asarray(gt_expressions)
+    pred_expressions = np.asarray(pred_expressions)
+
+    gt_tree = cKDTree(gt_positions)
+    pred_tree = cKDTree(pred_positions)
+
+    precisions = []
+
+    # sampling
+    if sample is not None:
+        n = int(len(gt_positions) * sample / 100)
+        idx = np.random.choice(len(gt_positions), size=n, replace=False)
+        samples = gt_positions[idx]
+    else:
+        samples = gt_positions
+
+    for i, pos in enumerate(tqdm(samples, desc="spots")):
+        # find neighbors
+        if k > 0:
+            _, gt_idx = gt_tree.query(pos, k=k+1)
+            _, pred_idx = pred_tree.query(pos, k=k+1)
+            gt_nbrs = gt_idx[1:]
+            pred_nbrs = pred_idx[1:]
+        else:
+            gt_nbrs = gt_tree.query_ball_point(pos, radius)
+            pred_nbrs = pred_tree.query_ball_point(pos, radius)
+
+        # sum expressions over neighbors
+        gt_sum = np.sum(gt_expressions[gt_nbrs], axis=0)
+        pred_sum = np.sum(pred_expressions[pred_nbrs], axis=0)
+
+        # compute precision: TP / (predicted positives)
+        pred_pos = pred_sum > 0
+        if pred_pos.sum() > 0:
+            true_pos = np.logical_and(pred_pos, gt_sum > 0).sum()
+            precisions.append(true_pos / pred_pos.sum())
+        else:
+            precisions.append(0.0)
+
+        if i and i % 10000 == 0:
+            print(f"Processed {i} spots...")
+
+    return float(np.mean(precisions)) if precisions else 0.0
+
 
 
 
@@ -231,3 +291,173 @@ def lookup_correlation(gt_celltypes, gt_positions, gt_expressions,
         k=k,
         sample=sample
     )
+
+
+
+
+
+
+
+
+
+
+import numpy as np
+from scipy.spatial import cKDTree
+from scipy.stats import pearsonr
+from tqdm import tqdm
+
+# def one_hot_encode(labels):
+#     """Map each label to an integer class and build one‑hot matrix."""
+#     classes = sorted(set(labels))
+#     idx = {c:i for i,c in enumerate(classes)}
+#     num = len(classes)
+#     return idx, num
+
+def _compute_enrichment_z(labels, positions, radius=None, k=0, n_permutations=1000, seed=None, C=0):
+    """
+    Compute the neighborhood enrichment z‑score matrix for one dataset.
+    
+    labels : list of hashable
+        Cell/spot cluster assignments.
+    positions : array (N,2 or 3)
+        x/y (or x/y/z) coordinates.
+    radius : float, optional
+        If >0, use radius‐based neighbors.
+    k : int, optional
+        If >0, use k nearest neighbors.
+    n_permutations : int
+        Number of random label shuffles to build null distribution.
+    seed : int, optional
+        RNG seed for reproducibility.
+        
+    Returns
+    -------
+    z : array (C,C)
+        z[i,j] is the enrichment of cluster i next to cluster j.
+    """
+    if (radius is None and k == 0) or (radius is not None and k > 0):
+        raise ValueError("Specify exactly one of `radius` or `k>0`.")
+    
+    labels = list(labels)
+    positions = np.asarray(positions)
+    # idx_map, C = one_hot_encode(labels)
+    # C = max(labels)+1
+
+    L = np.array(labels, dtype=int)
+    N = len(L)
+    
+    # build neighbor lists once
+    tree = cKDTree(positions)
+    neighbors = []
+    if k > 0:
+        dists, inds = tree.query(positions, k=k+1)
+        for u, nbrs in enumerate(inds):
+            # drop self
+            neighbors.append([v for v in nbrs if v != u])
+    else:
+        for u, pos in enumerate(positions):
+            nbrs = tree.query_ball_point(pos, radius)
+            neighbors.append([v for v in nbrs if v != u])
+    
+    # observed counts
+    obs = np.zeros((C, C), dtype=int)
+    for u in range(N):
+        i = L[u]
+        for v in neighbors[u]:
+            obs[i, L[v]] += 1
+    return obs
+    
+    # # null distributions
+    # rng = np.random.default_rng(seed)
+    # perm_counts = np.zeros((n_permutations, C, C), dtype=float)
+    # for t in tqdm(range(n_permutations), desc="permutations", leave=False):
+    #     perm = rng.permutation(L)
+    #     cnt = np.zeros((C, C), dtype=int)
+    #     for u in range(N):
+    #         i = perm[u]
+    #         for v in neighbors[u]:
+    #             cnt[i, perm[v]] += 1
+    #     perm_counts[t] = cnt
+    
+    # mu = perm_counts.mean(axis=0)
+    # sigma = perm_counts.std(axis=0, ddof=1)
+    # # avoid division by zero
+    # sigma[sigma == 0] = 1.0
+    # z = (obs - mu) / sigma
+    # return z
+
+import numpy as np
+
+def _realign_z(z, original_classes, target_classes, pad_value=0.0):
+    """
+    Take a (C0×C0) matrix `z` whose rows/cols correspond to original_classes,
+    and produce a (C×C) matrix in the order of target_classes, filling missing
+    entries with pad_value.
+    """
+    C = len(target_classes)
+    idx0 = {c:i for i, c in enumerate(original_classes)}
+    Z = np.full((C, C), pad_value, dtype=z.dtype)
+    for i, ci in enumerate(target_classes):
+        if ci not in idx0:
+            continue
+        ii = idx0[ci]
+        for j, cj in enumerate(target_classes):
+            if cj not in idx0:
+                continue
+            jj = idx0[cj]
+            Z[i, j] = z[ii, jj]
+    return Z
+
+def neighborhood_enrichment(
+    gt_celltypes, gt_positions,
+    pred_celltypes, pred_positions,
+    radius=None, k=0, n_permutations=1000,
+    return_matrix=False, seed=None
+):
+    """
+    Compare spatial neighborhood enrichment between ground truth and prediction.
+    
+    gt_celltypes, pred_celltypes : list of labels
+    gt_positions,   pred_positions   : list or array of coordinates
+    radius : float
+        Neighborhood radius.
+    k : int
+        Number of nearest neighbors.
+    n_permutations : int
+        How many random shuffles to build null.
+    return_matrix : bool
+        If True, return (z_gt, z_pred) matrices instead of a single score.
+    return_list : bool
+        If True, return a list of ((i,j), z_gt, z_pred) for all cluster pairs.
+    seed : int
+        RNG seed.
+        
+    Returns
+    -------
+    If neither return_matrix nor return_list:
+        float
+            Pearson correlation between flattened z‑score matrices.
+    If return_matrix:
+        z_gt, z_pred : arrays (C,C)
+    If return_list:
+        list of ((cluster_i, cluster_j), z_gt[i,j], z_pred[i,j])
+    """
+    z_gt   = _compute_enrichment_z(gt_celltypes,   gt_positions,   radius, k, n_permutations, seed, C=max(max(gt_celltypes),max(pred_celltypes))+1)
+    z_pred = _compute_enrichment_z(pred_celltypes, pred_positions, radius, k, n_permutations, seed, C=max(max(gt_celltypes),max(pred_celltypes))+1)
+    # ensure same shape    
+
+    classes = sorted(set(gt_celltypes) | set(pred_celltypes))
+
+
+
+    if return_matrix:
+        return z_gt, z_pred
+
+
+    flat_gt   = z_gt.ravel()
+    flat_pred = z_pred.ravel()
+    
+    
+    # default: one scalar summary
+    corr, _ = pearsonr(flat_gt, flat_pred)
+    return corr

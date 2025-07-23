@@ -3,3 +3,5 @@
 *.pyc
 dump
 ops
+*.csv
+*.out

@@ -47,13 +47,15 @@ def manual_alpha_shape_polygon(coords: np.ndarray, alpha: float) -> Polygon:
 
 
 class KDEMixture(nn.Module):
-    def __init__(self, spatial_data, bandwidth=1):
+    def __init__(self, spatial_data, bandwidth=1, z_factor=1.0):
         super(KDEMixture, self).__init__()
         self.N, self.d = spatial_data.shape
         if not isinstance(spatial_data, torch.Tensor):
             spatial_data = torch.tensor(spatial_data).float()
         self.spatial_data = nn.Parameter(spatial_data, requires_grad=True)
+
         self.bandwidth = nn.Parameter(torch.tensor(bandwidth, device=spatial_data.device), requires_grad=False)
+        self.z_factor = nn.Parameter(torch.tensor(z_factor, device=spatial_data.device), requires_grad=False)
         self.register_buffer("weights", torch.ones(self.N, device=spatial_data.device) / self.N)
 
     def forward(self, points, sample_frac=1.0):
@@ -68,10 +70,16 @@ class KDEMixture(nn.Module):
             spatial_subset = self.spatial_data.to(device)
             weight_subset = self.weights.to(device)
 
-        distances = torch.cdist(points, spatial_subset)
+        # Scale z-axis for sharper or flatter KDE
+        points_scaled = points.clone()
+        subset_scaled = spatial_subset.clone()
+        if self.d >= 3:
+            points_scaled[:, 2] *= self.z_factor
+            subset_scaled[:, 2] *= self.z_factor
+
+        distances = torch.cdist(points_scaled, subset_scaled)
         kernels = torch.exp(-distances ** 2 / (2 * self.bandwidth.to(device) ** 2))
         return torch.sum(weight_subset * kernels, dim=-1)
-
 
     def log_prob(self, points, sample_frac=1.0):
         density = self.forward(points, sample_frac=sample_frac)
@@ -83,7 +91,55 @@ class KDEMixture(nn.Module):
     def sample(self, num_samples):
         indices = torch.randint(0, self.N, (num_samples,), device=self.spatial_data.device)
         noise = torch.randn(num_samples, self.d, device=self.spatial_data.device) * self.bandwidth
+
+        if self.d >= 3:
+            noise[:, 2] /= self.z_factor  # Less noise in z → sharper
+
         return self.spatial_data[indices] + noise
+
+    def sample_conditionally(self, conditioning_points, num_samples):
+        """
+        Sample conditionally based on closeness to mean z-coordinate of conditioning points.
+
+        Parameters:
+        - conditioning_points: numpy array of shape (n, 3)
+        - num_samples: int, number of samples to generate
+
+        Returns:
+        - torch.Tensor of shape (num_samples, 3)
+        """
+        if self.d < 3:
+            raise ValueError("Conditional sampling expects 3D data.")
+
+        # Compute mean z (apply z_factor to match model's KDE scaling)
+        z_mean = np.mean(conditioning_points[:, 2]) * float(self.z_factor.cpu())
+
+        # Get spatial data in CPU numpy for selection
+        spatial_np = self.spatial_data.detach().cpu().numpy()
+        spatial_z_scaled = spatial_np[:, 2] * float(self.z_factor.cpu())
+
+        # Compute absolute distance from mean z
+        z_dists = np.abs(spatial_z_scaled - z_mean)
+
+        # Pick 2n indices with smallest z difference
+        n = conditioning_points.shape[0]
+        topk_idxs = np.argpartition(z_dists, 4 * n)[:4 * n]
+
+        # Convert to tensor
+        candidate_centers = self.spatial_data[topk_idxs]
+
+        # KDE sampling from selected subset
+        k = candidate_centers.shape[0]
+        chosen_idxs = torch.randint(0, k, (num_samples,), device=self.spatial_data.device)
+        base_points = candidate_centers[chosen_idxs]
+
+        noise = torch.randn(num_samples, self.d, device=self.spatial_data.device) * self.bandwidth
+
+        if self.d >= 3:
+            noise[:, 2] /= self.z_factor  # same sharpness rule
+
+        return base_points + noise
+
 
 
 class BiologicalModel2():
@@ -108,7 +164,7 @@ class BiologicalModel2():
             self.xyz=torch.cat([xy,z_posns.unsqueeze(-1)],1)
 
     def fit(self):
-        self.model=KDEMixture(self.xyz,bandwidth=self.bandwidth)
+        self.model=KDEMixture(self.xyz,bandwidth=self.bandwidth,z_factor=self.z_factor)
     
     
     def sample(self,z,size=1000):
@@ -119,37 +175,81 @@ class BiologicalModel2():
             samples+=data_points[selection].detach().cpu().numpy().tolist()
         return np.array(samples)
 
-    def sample_slice_conditionally(self, slice, size=1000, alpha=1.0):
-        coords_2d = slice.obsm["aligned_spatial"]
 
-        z = slice.obsm["aligned_spatial"][:,2].mean().item()
+    def sample_slice_conditionally(self, slice, size=1000, alpha=1.0, interior=False, dist_cutoff=0.5):
+        coords_3d = slice.obsm["aligned_spatial"]
+        coords_2d = coords_3d[:, :2]
         
-        # Get shapely polygon
-        polygon = manual_alpha_shape_polygon(coords_2d[:,:2], alpha=alpha)
+        # Step 1: Fit a plane to the 3D coordinates of the slice
+        xyz = torch.tensor(coords_3d, dtype=torch.float32).cuda()
+        xyz_mean = xyz.mean(dim=0, keepdim=True)
+        centered = xyz - xyz_mean
+        _, _, V = torch.pca_lowrank(centered)
+        normal = V[:, -1]  # Last component is the normal vector
 
-        slice_xyz = torch.tensor(slice.obsm["aligned_spatial"], dtype=torch.float32).cuda()
-        # Build KDE for the slice
-        slice_kde = KDEMixture(slice_xyz, bandwidth=self.bandwidth)
+        # Polygon for filtering 2D positions
+        polygon = manual_alpha_shape_polygon(coords_2d, alpha=alpha)
+        slice_kde = KDEMixture(xyz, bandwidth=self.bandwidth)
 
         accepted = []
         while len(accepted) < size:
+            # candidates = self.model.sample_conditionally(xyz.cpu().numpy(), 100000)
             candidates = self.model.sample(100000)
+            candidates = torch.tensor(candidates, dtype=torch.float32).cuda()
 
-            z_mask = torch.abs(candidates[:, 2] - z) < self.z_factor
-            candidates = candidates[z_mask]
+            # Step 2: Compute orthogonal distances to plane
+            diffs = candidates - xyz_mean  # (N, 3)
+            dists = torch.abs(torch.matmul(diffs, normal))  # scalar projection on normal vector
+
+            mask = dists < dist_cutoff
+            candidates = candidates[mask]
             if len(candidates) == 0:
                 continue
 
+            # Step 3: 2D polygon check
             candidates_2d = candidates[:, :2].detach().cpu().numpy()
-            outside_mask = np.array([not polygon.contains(Point(pt)) for pt in candidates_2d])
-            candidates = candidates[outside_mask]
+            if interior is not None:
+                outside_mask = np.array([polygon.contains(Point(pt)) == interior for pt in candidates_2d])
+                candidates = candidates[outside_mask]
 
             if len(candidates) == 0:
                 continue
 
-            accepted=accepted+candidates.detach().cpu().numpy().tolist()
+            accepted = accepted + candidates.detach().cpu().numpy().tolist()
 
         return np.array(accepted)[:size]
+
+    # def sample_slice_conditionally(self, slice, size=1000, alpha=1.0, interior=False, dist_cutoff=0.1):
+    #     coords_2d = slice.obsm["aligned_spatial"]
+
+    #     z = slice.obsm["aligned_spatial"][:,2].mean().item()
+        
+    #     # Get shapely polygon
+    #     polygon = manual_alpha_shape_polygon(coords_2d[:,:2], alpha=alpha)
+
+    #     slice_xyz = torch.tensor(slice.obsm["aligned_spatial"], dtype=torch.float32).cuda()
+    #     # Build KDE for the slice
+    #     slice_kde = KDEMixture(slice_xyz, bandwidth=self.bandwidth)
+
+    #     accepted = []
+    #     while len(accepted) < size:
+    #         candidates = self.model.sample_conditionally(slice_xyz.cpu().numpy(),100000)
+
+    #         z_mask = torch.abs(candidates[:, 2] - z) < dist_cutoff
+    #         candidates = candidates[z_mask]
+    #         if len(candidates) == 0:
+    #             continue
+
+    #         candidates_2d = candidates[:, :2].detach().cpu().numpy()
+    #         outside_mask = np.array([polygon.contains(Point(pt))==interior for pt in candidates_2d])
+    #         candidates = candidates[outside_mask]
+
+    #         if len(candidates) == 0:
+    #             continue
+
+    #         accepted=accepted+candidates.detach().cpu().numpy().tolist()
+
+    #     return np.array(accepted)[:size]
 
 
 
