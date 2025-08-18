@@ -9,6 +9,7 @@ from typing import Tuple, List
 
 import pandas as pd
 import numpy as np
+import scanpy as sc
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 
@@ -25,6 +26,7 @@ class _AnndataGenDataset(Dataset):
         include_0s: bool,
         add_xyz_noise: bool,
         min_max_bounds: List[int],
+        exclude_columns: List[str] = None,
     ):
         """
         Expects:
@@ -40,6 +42,7 @@ class _AnndataGenDataset(Dataset):
         self.include_0s = include_0s
         self.add_xyz_noise = add_xyz_noise
         self.min_max_bounds = min_max_bounds
+        self.exclude_columns = exclude_columns
 
     def __len__(self):
         return self.adata.n_obs
@@ -52,6 +55,7 @@ class _AnndataGenDataset(Dataset):
                                                             self.tok, 
                                                             self.add_xyz_noise, 
                                                             self.min_max_bounds,
+                                                            self.exclude_columns,
                                                            )
         prompt_tokens += self.tok.encode([self.sep_token])
         prompt_vals += [0]
@@ -112,6 +116,7 @@ def get_generation_dataloader(
     include_0s: bool = True,
     n_express_level: int = 10,
     add_xyz_noise: bool = False,
+    exclude_columns: List[str] = None,
 ) -> DataLoader:
     """
     Build a DataLoader for fine‑tuning on the conditional‑generation task.
@@ -152,7 +157,8 @@ def get_generation_dataloader(
         scm   = scm,
         include_0s = include_0s,
         add_xyz_noise = add_xyz_noise,
-        min_max_bounds = [0,n_express_level - 1]
+        min_max_bounds = [0,n_express_level - 1],
+        exclude_columns = exclude_columns,
     )
 
     # 3) dataloader
@@ -170,4 +176,50 @@ def get_generation_dataloader(
         pin_memory  = True,
     )
 
+def harmonize_dataset(adata, meta_info, coordfiles, organ='Brain', technology='M550', coord_suffix='_ccf', n_bins=100):
+    if adata.X.max() > 10:
+        sc.pp.normalize_total(adata, target_sum=1e4) 
+        sc.pp.log1p(adata)
+    sc.pp.filter_cells(adata,min_genes=10)
+    coord_bins = {}
+    for coord, coordfile in zip(('x','y','z'),coordfiles):
+        vals_full = adata.obs[f'{coord}{coord_suffix}'].values.astype(float)
+        vals = adata.obs[f'{coord}{coord_suffix}'].dropna().values.astype(float)
+        coord_bins[f'{coord}{coord_suffix}'] = np.linspace(vals.min(), vals.max(), n_bins)
+        edges = pkl.load(open(coordfile, 'rb'))
+        # edges   = coord_bins[f'{coord}{coord_suffix}']
+        bin_idxs = np.digitize(vals_full, edges, right=True)
+        adata.obs[f'<{coord}>'] = bin_idxs
+    adata.obs['organ'] = organ
+    adata.obs['technology'] = technology
+    cols = ['<x>','<y>','<z>','organ', 'class', 'subclass','supertype','cluster', 'technology']
+    mask = adata.obs[cols].notnull().all(axis=1)
+    adata = adata[mask].copy()
 
+    existing_genes = adata.var_names.tolist()
+
+    gene_set = list(meta_info['gene_set'])
+    new_genes = [g for g in gene_set if g not in existing_genes]
+    
+    print(f"Adding {len(new_genes)} new genes to adata")
+    
+    if len(new_genes) > 0:
+        n_obs = adata.n_obs
+        n_new_vars = len(new_genes)
+    
+        new_vars = pd.DataFrame(index=new_genes)
+        new_var = pd.concat([adata.var, new_vars], axis=0)
+        
+    
+        if sp.issparse(adata.X):
+            new_data = sp.csr_matrix((n_obs, n_new_vars))
+            X = sp.hstack([adata.X, new_data], format='csr')
+        else:
+            new_data = np.zeros((n_obs, n_new_vars))
+            X = np.hstack([adata.X, new_data])
+    
+        new_adata = sc.AnnData(X=X, var=new_var, obs=adata.obs, obsm=adata.obsm, uns=adata.uns)
+        new_adata.var_names_make_unique()
+        del adata
+        adata = new_adata
+    return adata

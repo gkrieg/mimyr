@@ -27,17 +27,107 @@ sys.path.append(os.path.abspath(root_path))
 from model.model import MulanConfig, scMulanModel
 from utils.hf_tokenizer import scMulanTokenizer
 from data_util import get_generation_dataloader
+from scMulan import tokens_and_vals_to_expression_row
+
+from scipy.stats import pearsonr
+import numpy as np
+from collections import defaultdict
+
+def evaluate_expression_correlation(
+    adata,
+    batch,
+    logits_labels,
+    logits_exp_real,
+    tokenizer,
+    tokens_and_vals_to_expression_row_fn,
+    var_names,
+    mask_token_id=-100
+):
+    """
+    Compute per-cell Pearson correlation between predicted and true expression.
+    
+    Parameters
+    ----------
+    adata : AnnData
+        The original data object to get ground truth from.
+    batch : dict
+        The current batch from the dataloader.
+    logits_labels : Tensor
+        Output of the model (B, T, vocab_size) — token logits.
+    logits_exp_real : Tensor
+        Output of the model (B, T, 1) — real-valued expression predictions.
+    tokenizer : scMulanTokenizer
+        Tokenizer used to map tokens to strings.
+    tokens_and_vals_to_expression_row_fn : function
+        The function that builds a gene expression vector from tokens and values.
+    var_names : List[str]
+        List of all gene names in order.
+    mask_token_id : int
+        The ID of the mask/pad token to ignore in output.
+    
+    Returns
+    -------
+    pearson_rs : List[float]
+        Pearson correlation per cell in the batch.
+    """
+    B, T, V = logits_labels.shape
+    logits_cls = logits_labels.argmax(dim=-1).cpu().numpy()           # (B, T)
+    expr_vals = logits_exp_real.squeeze(-1).cpu().numpy()             # (B, T)
+    idxs = batch['idx'] if 'idx' in batch else range(B)               # indices into adata
+
+    predicted_expr_rows = []
+    ground_truth_rows = []
+
+    for b in range(B):
+        gene_token_ids = logits_cls[b]
+        expr_values = expr_vals[b]
+        
+        # Filter out special tokens (mask, EOS, etc.)
+        valid_mask = (gene_token_ids != mask_token_id)
+        gene_token_ids = gene_token_ids[valid_mask]
+        expr_values = expr_values[valid_mask]
+
+        # Convert token IDs to strings
+        gene_tokens = tokenizer.convert_ids_to_tokens(gene_token_ids.tolist())
+
+        # Construct predicted expression row
+        pred_expr = tokens_and_vals_to_expression_row_fn(
+            var_names=var_names,
+            gene_tokens=gene_tokens,
+            gene_tokens_int=gene_token_ids.tolist(),
+            new_vals=expr_values.tolist(),
+            return_series=False
+        )
+        predicted_expr_rows.append(pred_expr)
+
+        # Get true expression from AnnData (dense or sparse)
+        gt_expr = adata.X[idxs[b]].toarray().flatten() if hasattr(adata.X, 'toarray') else adata.X[idxs[b]]
+        ground_truth_rows.append(gt_expr)
+
+    # Compute per-cell Pearson r
+    pearson_rs = []
+    for pred, gt in zip(predicted_expr_rows, ground_truth_rows):
+        if np.std(pred) > 0 and np.std(gt) > 0:
+            r, _ = pearsonr(pred, gt)
+        else:
+            r = 0.0
+        pearson_rs.append(r)
+
+    return pearson_rs
+
 
 def main():
     parser = argparse.ArgumentParser(
         description="Fine-tune scMulanModel on conditional generation with coords + validation"
     )
-    parser.add_argument("--ckp-path",    type=str, required=True,
+    parser.add_argument("--ckp-path",    type=str, default=None,
                         help="Path to pretrained checkpoint (.pt)")
     parser.add_argument("--meta-info",   type=str, required=True,
                         help="Path to meta_info.pt from pretraining")
     parser.add_argument("--adata",       type=str, required=True,
                         help="Path to input AnnData .h5ad file")
+    parser.add_argument("--adata2",       type=str, default=None,
+                        help="Path to second input AnnData .h5ad file")
     parser.add_argument("--kv-cache",    action="store_true",
                         help="Whether to use kv-cached model variant")
     parser.add_argument("--output-dir",  type=str, required=True,
@@ -73,6 +163,16 @@ def main():
                         help="Whether to add noise to x,y,z coordinates during training")
     parser.add_argument("--slice-nums", nargs='+',type=int, default=None,
                         help='List of slice IDs for spatial mouse brain atlases')
+    parser.add_argument(
+        "--val-slice-nums", nargs='+', type=int, default=None,
+        help="List of slice IDs to use for validation. If provided, we split by slices: "
+             "val = these slices; train = --slice-nums (if provided) or all other slices present."
+    )
+    parser.add_argument("--dummy",    action="store_true",
+                        help="Whether to use small dummy dataset")
+    parser.add_argument("--model-size", type=str, choices=["small", "medium", "large"], default=None,
+                    help="Model size to initialize if no checkpoint is provided")
+
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -94,7 +194,47 @@ def main():
 
 
     # 1) Load pretrained checkpoint
-    ckp = torch.load(args.ckp_path, map_location='cpu')
+    if args.ckp_path is not None:
+        ckp = torch.load(args.ckp_path, map_location='cpu')
+    else:
+        # Choose default config based on --model-size
+        if args.model_size is None:
+            raise ValueError("You must specify --model-size if --ckp_path is not provided")
+    
+        if args.model_size == "small":
+            model_args = {
+                'n_embd': 64,
+                'n_layer': 2,
+                'n_head': 4,
+                'vocab_size': 1011,
+                'expression_level': 100,
+                'dropout': 0.1,
+                'ele': 1
+            }
+        elif args.model_size == "medium":
+            model_args = {
+                'n_embd': 384,
+                'n_layer': 12,
+                'n_head': 12,
+                'vocab_size': 1011,
+                'expression_level': 100,
+                'dropout': 0.1,
+                'ele': 1
+            }
+        elif args.model_size == "large":
+            model_args = {
+                'n_embd': 1120,
+                'n_layer': 24,
+                'n_head': 16,
+                'vocab_size': 1011,
+                'expression_level': 100,
+                'dropout': 0.1,
+                'ele': 1
+            }
+        else:
+            raise ValueError("Invalid --model-size. Choose from: small, medium, large")
+    
+        ckp = {'model_args': model_args}
     if args.overwrite_vocab_size is not None:
         ckp['model_args']['vocab_size'] = args.overwrite_vocab_size
         print(f"Overwriting config.vocab_size to {args.overwrite_vocab_size}")
@@ -129,30 +269,32 @@ def main():
     
 
     print('initialized model', flush=True)
-    # 4) Load AnnData and split into train/validation
+    print('initialized model', flush=True)
+    # 4) Load AnnData ONCE
     adata = sc.read_h5ad(args.adata)
-
-    if args.slice_nums is not None:
-        slice_names = [f'C57BL6J-638850.{s}' for s in args.slice_nums]
-        obs_in_slices = adata.obs_names[adata.obs['brain_section_label'].isin(slice_names)]
-        adata._inplace_subset_obs(adata.obs['brain_section_label'].isin(slice_names))
-        print(f'Subsetted adata to only contain {args.slice_nums} slices giving {adata}')
-
-    # Add genes for mulan gene set
+    
+    # Optionally subset to specific training slices first (like your current --slice-nums)
+    # NOTE: We will refine this logic below when --val-slice-nums is used
+    if args.slice_nums is not None and args.val_slice_nums is None:
+        slice_names_train = [f'C57BL6J-638850.{s}' for s in args.slice_nums]
+        adata._inplace_subset_obs(adata.obs['brain_section_label'].isin(slice_names_train))
+        print(f"Subsetted adata to only contain train slices {args.slice_nums} → {adata}")
+    
+    if args.dummy:
+        adata._inplace_subset_obs(adata.obs_names[:100])
+        print('using only first 100 cells')
+    
+    # Add genes for mulan gene set (unchanged)
     existing_genes = adata.var_names.tolist()
-    
-    gene_set = list(meta_info['gene_set'])
+    gene_set = list(set(list(meta_info['gene_set'])))
     new_genes = [g for g in gene_set if g not in existing_genes]
-    
     print(f"Adding {len(new_genes)} new genes to adata")
     
     if len(new_genes) > 0:
         n_obs = adata.n_obs
         n_new_vars = len(new_genes)
-    
         new_vars = pd.DataFrame(index=new_genes)
         new_var = pd.concat([adata.var, new_vars], axis=0)
-        
     
         if sp.issparse(adata.X):
             new_data = sp.csr_matrix((n_obs, n_new_vars))
@@ -160,27 +302,147 @@ def main():
         else:
             new_data = np.zeros((n_obs, n_new_vars))
             X = np.hstack([adata.X, new_data])
-
-        new_adata = sc.AnnData(X=X, var=new_var, obs=adata.obs, obsm=adata.obsm, uns=adata.uns)
-        new_adata.var_names_make_unique()
-        del adata
-        adata = new_adata
-
     
-    print('adata loaded')
-    n_cells = adata.n_obs
-    if args.val_split > 0:
-        idxs = np.arange(n_cells)
-        np.random.shuffle(idxs)
-        n_val = int(n_cells * args.val_split)
-        val_idxs, train_idxs = idxs[:n_val], idxs[n_val:]
-        adata_val = adata[val_idxs].copy()  # Small, independent copy
-        adata._inplace_subset_obs(~adata.obs_names.isin(adata.obs_names[val_idxs]))
+        adata = sc.AnnData(X=X, var=new_var, obs=adata.obs, obsm=adata.obsm, uns=adata.uns)
+        adata.var_names_make_unique()
+    
+    # -----------------------------
+    # NEW: version 1 — slice-based split if --val-slice-nums is provided
+    # -----------------------------
+    if args.val_slice_nums is not None:
+        # Build slice name sets
+        val_slice_names   = [f'C57BL6J-638850.{s}' for s in args.val_slice_nums]
+        if args.slice_nums is not None:
+            train_slice_names = [f'C57BL6J-638850.{s}' for s in args.slice_nums]
+        else:
+            train_slice_names = []  # use all other slices not in val
+    
+        # Compute union so we subset once, then do minimal copies
+        union_names = sorted(set(train_slice_names) | set(val_slice_names))
+        if len(union_names) > 0:
+            mask_union = adata.obs['brain_section_label'].isin(union_names)
+            adata._inplace_subset_obs(mask_union)
+            print(f"Kept only union(train, val) slices → {adata}")
+    
+        # Now determine masks within this subset
+        val_mask = adata.obs['brain_section_label'].isin(val_slice_names)
+        if len(train_slice_names) > 0:
+            train_mask = adata.obs['brain_section_label'].isin(train_slice_names)
+        else:
+            train_mask = ~val_mask  # everything else is train
+    
+        # Copy out val; in-place subset for train (minimize copies)
+        adata_val = adata[val_mask].copy()
+        adata._inplace_subset_obs(train_mask)
         adata_train = adata
-    else:
-        adata_train = adata
-        adata_val   = None
+    
+        # If a second AnnData is provided, split it to match train/val counts and then concatenate
+        if args.adata2 is not None:
+            train_path = os.path.join(args.output_dir, "train.h5ad")
 
+            if os.path.exists(train_path):
+                print(f"Found existing {train_path}, loading instead of rebuilding...")
+                adata_train = sc.read_h5ad(train_path)
+            else:
+                rng = np.random.default_rng(seed=getattr(args, "seed", None))
+                adata2 = sc.read_h5ad(args.adata2)
+                adata2.var_names_make_unique()
+                adata2._inplace_subset_var(gene_set)
+                
+                print(adata2)
+                #n_val   = adata_val.n_obs
+                n_train = adata_train.n_obs
+                if n_train > adata2.n_obs:
+                    raise ValueError(f"--adata2 has only {adata2.n_obs} cells, cannot split into "
+                                     f"{n_train} train + {n_val} val.")
+        
+                # sample validation cells first (no replacement), then training from remaining
+                all_idx = np.arange(adata2.n_obs)
+                #idx_val = rng.choice(all_idx, size=n_val, replace=False)
+                #remain  = np.setdiff1d(all_idx, idx_val, assume_unique=False)
+                idx_train = rng.choice(all_idx, size=n_train, replace=False)
+                #adata2_val   = adata2[idx_val].copy()
+                adata2._inplace_subset_obs(idx_train)
+                adata2_train = adata2
+                print(adata2_train)
+                adata_train.obs_names_make_unique()
+                adata2_train.obs_names_make_unique()
+                
+        
+                # Concatenate each split separately
+                adata_train = sc.concat(
+                    [adata_train,adata2_train], join='outer',
+                    label='dataset_type', keys=['st', 'scrna']
+                )
+                print(adata_train)
+                train_path = os.path.join(args.output_dir, "train.h5ad")
+                if rank == 0:
+                    adata_train.write(train_path)
+            #if n_val > 0:
+                #adata_val = adata_val.concatenate(
+                    #adata2_val, join='outer',
+                    #batch_key='dataset_type', batch_categories=['st', 'scrna']
+                #)
+    
+    # -----------------------------
+    # version 2 — random split if --val-slice-nums is NOT provided
+    # (same behavior as before, but now we also save obs_names)
+    # -----------------------------
+    else:
+        n_cells = adata.n_obs
+        if args.val_split > 0:
+            idxs = np.arange(n_cells)
+            np.random.shuffle(idxs)
+            n_val = int(n_cells * args.val_split)
+            val_idxs, train_idxs = idxs[:n_val], idxs[n_val:]
+    
+            # Make a tiny, independent copy only for the validation set
+            adata_val = adata[val_idxs].copy()
+    
+            # Train: inplace subset (no full copy)
+            adata._inplace_subset_obs(~adata.obs_names.isin(adata.obs_names[val_idxs]))
+            adata_train = adata
+    
+            # If a second AnnData is provided, match counts and concatenate like before
+            if args.adata2 is not None:
+                adata2 = sc.read_h5ad(args.adata2)
+                num_adata_cells = len(adata_train.obs_names)# + len(adata_val.obs_names)
+                if num_adata_cells > adata2.n_obs:
+                    raise ValueError(f"adata2 only has {adata2.n_obs} cells, cannot match {num_adata_cells}")
+    
+                rng = np.random.default_rng(seed=getattr(args, "seed", None))
+                # sample total, then split sampled into train/val sizes
+                total_idx = rng.choice(adata2.n_obs, size=num_adata_cells, replace=False)
+                n_train = adata_train.n_obs
+                idx_train2 = total_idx[:n_train]
+                #idx_val2   = total_idx[n_train:]
+                adata2._inplace_subset_obs(idx_train2)
+    
+                adata2_train = adata2
+                #adata2_val   = adata2[idx_val2].copy()
+    
+                adata_train = adata_train.concatenate(
+                    adata2_train, join='outer',
+                    batch_key='dataset_type', batch_categories=['st', 'scrna']
+                )
+                #adata_val = adata_val.concatenate(
+                    #adata2_val, join='outer',
+                    #batch_key='dataset_type', batch_categories=['st', 'scrna']
+                #)
+    
+            # Save obs_names so you can reuse them later
+            train_obs_path = os.path.join(args.output_dir, "train_obs.txt")
+            val_obs_path   = os.path.join(args.output_dir, "val_obs.txt")
+            np.savetxt(train_obs_path, adata_train.obs_names.to_numpy(), fmt='%s')
+            np.savetxt(val_obs_path,   adata_val.obs_names.to_numpy(),   fmt='%s')
+            print(f"Saved train obs_names → {train_obs_path}")
+            print(f"Saved val   obs_names → {val_obs_path}")
+    
+        else:
+            adata_train = adata
+            adata_val   = None
+    
+    # Build loaders (unchanged except they now use adata_train/adata_val from above)
     train_loader = get_generation_dataloader(
         adata      = adata_train,
         meta_info  = meta_info,
@@ -191,6 +453,7 @@ def main():
         n_express_level=model.config.expression_level,
         include_0s = False,
         add_xyz_noise = args.xyz_noise,
+        exclude_columns = ['supertype','cluster'],
     )
     if adata_val is not None:
         val_loader = get_generation_dataloader(
@@ -206,6 +469,7 @@ def main():
     else:
         val_loader = None
     print('loaded anndata')
+
     # 5) Optimizer
     optimizer = AdamW(model.parameters(), lr=args.lr)
 
@@ -298,6 +562,7 @@ def main():
             torch.cuda.empty_cache()
             model.eval()
             v_loss, v_cls, v_exp_bin, v_exp_real, count = 0.0, 0.0, 0.0, 0.0, 0
+            all_pearson_rs = []
             with torch.no_grad():
                 for batch in tqdm(val_loader, desc=f"Epoch {epoch} [val]"):
                     input_ids      = batch['input_ids'].to(device)
@@ -309,7 +574,7 @@ def main():
                     if labels is not None:
                         labels = labels.to(device)
 
-                    _, _, _, l, lc, leb, ler = model(
+                    logits_labels, _, logits_exp_real, l, lc, leb, ler = model(
                         idx=input_ids,
                         x_expr=x_expr,
                         targets=labels,
@@ -322,18 +587,32 @@ def main():
                     v_exp_bin  += leb.item()
                     v_exp_real  += ler.item()
                     count  += 1
+                    pearson_rs = evaluate_expression_correlation(
+                        adata=adata_val,
+                        batch=batch,
+                        logits_labels=logits_labels.cpu(),
+                        logits_exp_real=logits_exp_real.cpu(),
+                        tokenizer=tokenizer,
+                        tokens_and_vals_to_expression_row_fn=tokens_and_vals_to_expression_row,
+                        var_names=adata_val.var_names.tolist(),
+                        mask_token_id=tokenizer.pad_token_id
+                    )
+                    all_pearson_rs.extend(pearson_rs)
 
             avg_v_loss = v_loss / count
             avg_v_cls  = v_cls  / count
             avg_v_exp_bin  = v_exp_bin  / count
             avg_v_exp_real  = v_exp_real  / count
             print(f"Epoch {epoch} — valid total {avg_v_loss:.4f}, cls {avg_v_cls:.4f}, exp {avg_v_exp_bin:.4f}")
+            mean_pearson_r = np.mean(all_pearson_rs)
+            print(f"Validation mean Pearson r: {mean_pearson_r:.4f}")
             if rank == 0:
                 wandb.log({
                     "valid/epoch_loss":     avg_v_loss,
                     "valid/epoch_loss_cls": avg_v_cls,
                     "valid/epoch_loss_exp_bin": avg_v_exp_bin,
                     "valid/epoch_loss_exp_real": avg_v_exp_real,
+                    "valid/pearson_r": mean_pearson_r,
                     "epoch":                epoch,
                 })
 

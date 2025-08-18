@@ -567,7 +567,7 @@ class scMulan:
                 new_vals = gen_vals[plen:]
                 gene_tokens = self.tokenizer.convert_ids_to_tokens(new_ids)
     
-                row = self.tokens_and_vals_to_expression_row(
+                row = tokens_and_vals_to_expression_row(
                     var_names=self.adata.var_names.tolist(),
                     gene_tokens=gene_tokens,
                     gene_tokens_int=gen_seq,
@@ -587,70 +587,6 @@ class scMulan:
                 print(f"Total batch time: {time.time() - batch_start_time:.2f} sec")
     
         return results
-
-
-
-
-    def tokens_and_vals_to_expression_row(
-        self,
-        var_names: List[str],
-        gene_tokens: List[str],
-        gene_tokens_int: List[int],
-        new_vals: List[float],
-        return_series: bool = False
-    ) -> Union[np.ndarray, pd.Series]:
-        """
-        Build an expression‐vector aligned to var_names from
-        a list of gene_tokens + real‐valued new_vals.
-        
-        - Missing genes → 0
-        - Duplicates → average over their values
-        """
-
-        # Convert gene_tokens to integers if they are strings
-        # gene_tokens_int = [int(tok) for tok in gene_tokens]
-        
-        cut_idx = None
-        seen_below_200 = False
-        
-        for i in range(1, len(gene_tokens_int)):
-            curr_tok = gene_tokens_int[i]
-            prev_tok = gene_tokens_int[i - 1]
-        
-            if curr_tok < 200:
-                seen_below_200 = True
-        
-            if seen_below_200:
-                if curr_tok > prev_tok:
-                    cut_idx = i
-                    break
-        
-        if cut_idx is not None:
-            gene_tokens = gene_tokens[:cut_idx]
-            new_vals = new_vals[:cut_idx]
-
-        # if '0' in gene_tokens:
-        #     stop_idx = gene_tokens.index('0')
-        #     gene_tokens = gene_tokens[:stop_idx]
-        #     new_vals = new_vals[:stop_idx]
-
-        
-            
-        # 1) Aggregate values per gene
-        agg = {}
-        for g, v in zip(gene_tokens, new_vals):
-            agg.setdefault(g, []).append(v)
-        # 2) compute mean for each gene
-        avg = {g: sum(vals) / len(vals) for g, vals in agg.items()}
-    
-        # 3) build the output row
-        expr = np.zeros(len(var_names), dtype=float)
-        for i, gene in enumerate(var_names):
-            expr[i] = avg.get(gene, 0.0)
-    
-        if return_series:
-            return pd.Series(expr, index=var_names)
-        return expr
 
         
     def is_cell_type_entity(self, token_entity):
@@ -744,11 +680,12 @@ def model_generate(ckp_path: str,
     ckp = torch.load(ckp_path, map_location='cpu')
     # ckp['model_args']['expression_level'] = 100
     gptconf = MulanConfig(**ckp['model_args'])
-    print(gptconf)
     gptconf.vocab_size = len(meta_info['token_set'])
     # bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],gptconf.expression_level)
     bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],n_express_level)
     gptconf.bin_edges = bin_edges
+    gptconf.dropout = 0.0
+    print(gptconf)
 
     if use_kv_cache == False:
         model = scMulanModel(gptconf)
@@ -790,7 +727,8 @@ def generate_prompt_for_cg(
     meta_pool: dict,
     tokenizer: scMulanTokenizer,
     add_xyz_noise: bool = False,
-    min_max_bounds=None
+    min_max_bounds=None,
+    randomly_exclude_columns: Optional[List[str]] = None,
 ) -> Tuple[List[int], List[int]]:
     """
     Build prompt IDs by scanning meta_pool for keys that are actual
@@ -813,6 +751,10 @@ def generate_prompt_for_cg(
         # only consider columns you actually have
         if col not in meta_data.columns:
             continue
+        
+        if randomly_exclude_columns and col in randomly_exclude_columns:
+            if np.random.rand() < 0.5:
+                continue
             
         col_idx = col_positions[col]
         val = meta_data.iat[idx, col_idx]
@@ -844,7 +786,7 @@ def generate_prompt_for_cg(
 
             if add_xyz_noise:
                 val = int(val)  # ensure it's an integer
-                noise = np.random.choice([-1, 0, 1])  # discrete noise
+                noise = np.random.choice([-2, -1, 0, 1, 2])  # discrete noise
                 val += noise
                 min_val, max_val = min_max_bounds
                 val = max(min_val, min(val, max_val))  # clamp
@@ -924,3 +866,63 @@ def compute_global_bin_edges(
     max_val = vals.max()
     edges = np.linspace(min_val, max_val, n_express_level + 1)
     return edges
+
+def tokens_and_vals_to_expression_row(
+    var_names: List[str],
+    gene_tokens: List[str],
+    gene_tokens_int: List[int],
+    new_vals: List[float],
+    return_series: bool = False
+) -> Union[np.ndarray, pd.Series]:
+    """
+    Build an expression‐vector aligned to var_names from
+    a list of gene_tokens + real‐valued new_vals.
+    
+    - Missing genes → 0
+    - Duplicates → average over their values
+    """
+
+    # Convert gene_tokens to integers if they are strings
+    # gene_tokens_int = [int(tok) for tok in gene_tokens]
+    
+    cut_idx = None
+    seen_below_200 = False
+    
+    for i in range(1, len(gene_tokens_int)):
+        curr_tok = gene_tokens_int[i]
+        prev_tok = gene_tokens_int[i - 1]
+    
+        if curr_tok < 200:
+            seen_below_200 = True
+    
+        if seen_below_200:
+            if curr_tok > prev_tok:
+                cut_idx = i
+                break
+    
+    if cut_idx is not None:
+        gene_tokens = gene_tokens[:cut_idx]
+        new_vals = new_vals[:cut_idx]
+
+    # if '0' in gene_tokens:
+    #     stop_idx = gene_tokens.index('0')
+    #     gene_tokens = gene_tokens[:stop_idx]
+    #     new_vals = new_vals[:stop_idx]
+
+    
+        
+    # 1) Aggregate values per gene
+    agg = {}
+    for g, v in zip(gene_tokens, new_vals):
+        agg.setdefault(g, []).append(v)
+    # 2) compute mean for each gene
+    avg = {g: sum(vals) / len(vals) for g, vals in agg.items()}
+
+    # 3) build the output row
+    expr = np.zeros(len(var_names), dtype=float)
+    for i, gene in enumerate(var_names):
+        expr[i] = avg.get(gene, 0.0)
+
+    if return_series:
+        return pd.Series(expr, index=var_names)
+    return expr
