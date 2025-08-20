@@ -40,6 +40,7 @@ from scipy.spatial import cKDTree
 import pandas as pd
 from anndata import AnnData
 import tqdm
+import pickle as pkl
 
 from sklearn.neighbors import NearestNeighbors
 
@@ -134,6 +135,7 @@ class Inferernce:
 
         if self.expression_inference_type == "averaging":
             rows = np.array(self.token_mapping_model.get_gene_exp_from_token(adata_sampled.obs["token"].tolist()))[:,0]
+            print(rows.shape)
             obs = adata_sampled.obs.copy()
 
             # 2) make a var DataFrame of length 550
@@ -205,85 +207,62 @@ class Inferernce:
             import numpy as np
             import scanpy as sc
             import torch
-            def harmonize_dataset(adata, meta_info, organ='Brain', technology='M550', coord_suffix='_ccf', n_bins=100):
-                if adata.X.max() > 10:
-                    sc.pp.normalize_total(adata, target_sum=1e4) 
-                    sc.pp.log1p(adata)
-                sc.pp.filter_cells(adata,min_genes=10)
-                coord_bins = {}
-                for i,coord in enumerate(('x','y','z')):
-                    vals_full = adata.obsm["spatial"][:,i]
-                    vals = adata.obsm["spatial"][:,i]
-                    coord_bins[f'{coord}{coord_suffix}'] = np.linspace(vals.min(), vals.max(), n_bins)
-                    edges   = coord_bins[f'{coord}{coord_suffix}']
-                    bin_idxs = np.digitize(vals_full, edges, right=True)
-                    adata.obs[f'<{coord}>'] = bin_idxs
-                adata.obs['organ'] = organ
-                adata.obs['technology'] = technology
-                cols = ['<x>','<y>','<z>','organ', 'class', 'subclass','supertype','cluster', 'technology']
-                mask = adata.obs[cols].notnull().all(axis=1)
-                adata = adata[mask].copy()
 
-                existing_genes = adata.var_names.tolist()
+            meta_info = torch.load(f'{self.slice_data_loader.metadata_dir}4hierarchy_metainfo_mouse.pt')
 
-                gene_set = list(meta_info['gene_set'])
-                new_genes = [g for g in gene_set if g not in existing_genes]
-                
-                print(f"Adding {len(new_genes)} new genes to adata")
-                
-                if len(new_genes) > 0:
-                    n_obs = adata.n_obs
-                    n_new_vars = len(new_genes)
-                
-                    new_vars = pd.DataFrame(index=new_genes)
-                    new_var = pd.concat([adata.var, new_vars], axis=0)
-                    
-                
-                    if sp.issparse(adata.X):
-                        new_data = sp.csr_matrix((n_obs, n_new_vars))
-                        X = sp.hstack([adata.X, new_data], format='csr')
-                    else:
-                        new_data = np.zeros((n_obs, n_new_vars))
-                        X = np.hstack([adata.X, new_data])
-                
-                    new_adata = sc.AnnData(X=X, var=new_var, obs=adata.obs, obsm=adata.obsm, uns=adata.uns)
-                    new_adata.var_names_make_unique()
-                    del adata
-                    adata = new_adata
-                return adata
-
-            meta_info = torch.load('/work/magroup/skrieger/tissue_generator/MERFISH_aging/4hierarchy_metainfo_mouse.pt')
-
-            # 1) preserve obs
-            adata_sub = adata_sampled
-            obs = adata_sub.obs.copy()
+            # 1) preserve obs but add necessary technology metadata, etc.
+            for name, default in zip(['organ', 'technology', 'species', 'disease_state'], ['brain','M550','mouse','healthy']):
+                if name in adatas[0].obs.columns:
+                    adata_sampled.obs[name] = adatas[0].obs[name]
+                else:
+                    adata_sampled.obs[name] = default
+            # Get higher hierarchy levels
+            adata_sampled.obs['readable_label'] = self.token_mapping_model.get_label_from_token(adata_sampled.obs['token'].values)
+            hierarchy = pkl.load(open(f'{self.slice_data_loader.metadata_dir}hierarchy.pkl','rb'))
+            for h in ['class', 'subclass','supertype','cluster']:
+                adata_sampled.obs[h] = 'na'
+            for cell in adata_sampled.obs_names:
+                c, sc, st, cl = hierarchy[('subclass',adata_sampled.obs.loc[cell, 'readable_label'])]
+                for h, v in zip(['class', 'subclass','supertype','cluster'], [c, sc, st, cl]):
+                    adata_sampled.obs.loc[cell, h] = v
+            # Get binned x,y,z
+            coordfiles = [f'{self.slice_data_loader.metadata_dir}edges_x.pkl',
+                          f'{self.slice_data_loader.metadata_dir}edges_y.pkl',
+                          f'{self.slice_data_loader.metadata_dir}edges_z.pkl',
+                         ]
+            for coord, coordfile, i in zip(('x','y','z'),coordfiles, range(3)):
+                vals_full = adata_sampled.obsm[f'spatial'][:,i].astype(float)
+                edges = pkl.load(open(coordfile, 'rb'))
+                # edges   = coord_bins[f'{coord}{coord_suffix}']
+                bin_idxs = np.digitize(vals_full, edges, right=True)
+                adata_sampled.obs[f'<{coord}>'] = bin_idxs
+            obs = adata_sampled.obs.copy()
+            
 
             # 2) make a var DataFrame of length 550
             var = pd.DataFrame(index=adatas[0].var_names)
 
             # 3) build brand-new X as zeros, sparse
-            X_sparse = adatas[0].X
+            X_sparse = np.zeros((len(adata_sampled.obs_names),len(adatas[0].var_names)))
 
             # 4) re-create
             adata_sub = AnnData(X=X_sparse, obs=obs, var=var, obsm=adata_sampled.obsm.copy())
-
-            harmonized_adata = harmonize_dataset(adata_sub,meta_info)
-
-            ckp_path = '/compute/oven-0-13/skrieger/scMulan-output-mouse-ST-small/epoch43_model.pt'
+            ckp_path = '/compute/oven-0-13/skrieger/mouse-mediummodelscrna/epoch30_model.pt'
             scml = model_generate(ckp_path=ckp_path,
-                                adata=harmonized_adata,
+                                adata=adata_sub,
                                 meta_info=meta_info,
                                 use_kv_cache=True,
                                 )
-            rows = []
             results = scml.generate_cell_genesis(
-                        idx=[10,12],
-                        max_new_tokens= 200,
-                        top_k=5,
-                        verbose=False,
-                        return_gt=True,
-                        batch_size=24,
-                    )
+                idx=range(len(adata_sampled.obs_names)),
+                max_new_tokens=200,
+                top_k=5,
+                verbose=False,
+                return_gt=False,
+                batch_size=128,
+                cheat_with_tokens=None,
+                cheat_with_expr=None,
+            )
             rows = [r[0] for r in results]
 
             rows = np.array(rows)
@@ -293,12 +272,13 @@ class Inferernce:
             var = pd.DataFrame(index=adatas[0].var_names)
 
             # 4) re-create
-            return AnnData(X=rows, obs=obs, var=var)
+            adata = AnnData(X=rows, obs=obs, var=scml.adata.var, obsm=adata_sampled.obsm)
+            print(adata)
+            return adata
 
     def run_inference(self, adatas):
         new_tissue = ad.concat(adatas)
         device = "cuda"
-
         if self.do_infer_location:
             xyz_samples = torch.tensor(
                 self.infer_location(new_tissue), dtype=torch.float32
@@ -307,12 +287,11 @@ class Inferernce:
             xyz_samples = torch.tensor(
                 new_tissue.obsm["aligned_spatial"], dtype=torch.float32
             ).to(device)
-
         if self.do_infer_subclass:
             adata_sampled = self.infer_subclass(xyz_samples)
         else:
             adata_sampled = new_tissue
-
+        # Need to bin the location info and recreate the 4 hierarchy, along with the other metadata things
         if self.do_infer_gene_expression:
             adata_sampled = self.infer_expression(adatas, adata_sampled)
 

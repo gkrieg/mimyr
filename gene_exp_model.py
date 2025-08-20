@@ -120,7 +120,8 @@ class GeneExpModel(nn.Module):
         self.subclass_to_id=subclass_to_id
         concatenated_slices.obs["token"] = concatenated_slices.obs[self.label].map(subclass_to_id)
 
-        gene_exp_dict={i:concatenated_slices[concatenated_slices.obs["token"]==i].X.mean(0) for i in range(len(unique_subclasses))}            
+        gene_exp_dict={i:concatenated_slices[concatenated_slices.obs["token"]==i].X.mean(0) for i in range(len(unique_subclasses))}  
+        print(gene_exp_dict[0].shape)
         # self.gene_exp_to_token = {concatenated_slices.X[i].sum():concatenated_slices.obs["token"][i] for i in range(len(concatenated_slices))}
         row_sums = np.array(concatenated_slices.X.sum(axis=1)).flatten()  # Convert to 1D NumPy array
         tokens = concatenated_slices.obs["token"].values  # Convert to NumPy array if needed

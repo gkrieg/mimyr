@@ -16,18 +16,17 @@ class Evaluator:
 
 
         for k in [5, 10, 20]:
-            try:
-                sc=soft_correlation(target_adata.X.todense().tolist(),target_adata.obsm["aligned_spatial"],predicted_adata.X.todense().tolist(),predicted_adata.obsm["spatial"],k=k,sample=sample)
-            except:
-                sc=soft_correlation(target_adata.X.todense().tolist(),target_adata.obsm["aligned_spatial"],predicted_adata.X.tolist(),predicted_adata.obsm["spatial"],k=k,sample=sample)
+
+            sc=soft_correlation(target_adata,target_adata.obsm["aligned_spatial"],predicted_adata,predicted_adata.obsm["spatial"],k=k,sample=sample)
             print("soft correlation @",k,":",sc)
             results[f"soft_correlation@{k}"]=sc
 
         for k in [5, 10, 20]:
-            try:
-                sp=soft_precision(target_adata.X.todense().tolist(),target_adata.obsm["aligned_spatial"],predicted_adata.X.todense().tolist(),predicted_adata.obsm["spatial"],k=k,sample=sample)
-            except:
-                sp=soft_precision(target_adata.X.todense().tolist(),target_adata.obsm["aligned_spatial"],predicted_adata.X.tolist(),predicted_adata.obsm["spatial"],k=k,sample=sample)
+            sp=soft_precision(target_adata,
+                              target_adata.obsm["aligned_spatial"],
+                              predicted_adata,
+                              predicted_adata.obsm["spatial"],k=k,sample=sample)
+
 
             print("soft precision @",k,":",sp)
             results[f"soft_precision@{k}"]=sp

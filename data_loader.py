@@ -6,9 +6,11 @@ import tqdm
 import numpy as np
 from alignment_model import AlignementModel
 from gene_exp_model import GeneExpModel
+from generative_transformer.data_util import harmonize_dataset
+import torch
 
 class SliceDataLoader:
-    def __init__(self, mode="intra", label="subclass"):
+    def __init__(self, mode="intra", label="subclass", metadata_dir='generative_transformer/metadata/'):
         """
         Args:
             mode (str): 'intra' or 'transfer'
@@ -26,6 +28,8 @@ class SliceDataLoader:
         }
         
         self.ccf_csv = "data/ccf_coordinates.csv"
+
+        self.metadata_dir = metadata_dir
         
         self.train_slices = None
         self.val_slices = None
@@ -127,11 +131,21 @@ class SliceDataLoader:
             val_slice = slices_tokenized[26]
             test_slice = slices_tokenized[28]
             train_slices = slices_tokenized[:26] + slices_tokenized[27:28] + slices_tokenized[29:]
+            reference_slices = [slices_tokenized[27],slices_tokenized[29]]
+
+            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse.pt')
+            edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
+            for s in train_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+            for s in reference_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+            val_slice = harmonize_dataset(val_slice, meta_info, edges)
+            test_slice = harmonize_dataset(test_slice, meta_info, edges)
 
             self.train_slices = train_slices
             self.val_slices = [val_slice]
             self.test_slices = [test_slice]
-            self.reference_slices = [slices_tokenized[27],slices_tokenized[29]]
+            self.reference_slices = reference_slices
 
             # No fine-tuning slices in intra mode
             self.fine_tune_train_slices = None
@@ -206,15 +220,36 @@ class SliceDataLoader:
                 slices_tokenized[:26] + slices_tokenized[27:28] + slices_tokenized[29:] + [slice28_rest]
             )
 
+            reference_slices = [slices_tokenized[27],slices_tokenized[29]]
+
+            
+            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse.pt')
+            edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
+            new_train_slices = []
+            for s in train_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_train_slices.append(s)
+            train_slices = new_train_slices
+            new_reference_slices = []
+            for s in reference_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_reference_slices.append(s)
+            reference_slices = new_reference_slices
+            val_slice = harmonize_dataset(val_slice, meta_info, edges)
+            test_slice_hole = harmonize_dataset(slice28_hole, meta_info, edges)
+
             self.train_slices = train_slices
             self.val_slices = [val_slice]
-            self.test_slices = [slice28_hole]
-            self.reference_slices = [slices_tokenized[27],slices_tokenized[29]]
+            self.test_slices = [test_slice_hole]
+            self.reference_slices = reference_slices
 
             # No fine-tuning slices in intra mode
             self.fine_tune_train_slices = None
             self.fine_tune_val_slices = None
             self.fine_tune_test_slices = None
+
+            self.gene_exp_model = GeneExpModel(train_slices, label=self.label)
+            self.gene_exp_model.fit()
 
         elif self.mode == "intra3_hole":
             # Only load slices1

@@ -121,6 +121,43 @@ def diversity(gt_celltypes, gt_positions, radius):
     return np.array(result)
 
 
+import numpy as np
+import scipy.sparse as sp
+
+def _nnz_per_gene(X):
+    if sp.issparse(X):
+        return np.asarray(X.getnnz(axis=0)).ravel()
+    return np.asarray((X > 0).sum(axis=0)).ravel()
+
+def intersect_and_filter_X(gt_adata, pred_adata, min_expr_cells=1):
+    # 1) intersect genes (order is preserved by AnnData slicing)
+    common_genes = gt_adata.var_names.intersection(pred_adata.var_names)
+    if len(common_genes) == 0:
+        raise ValueError("No overlapping genes between gt_adata and pred_adata.")
+
+    gt_common   = gt_adata[:, common_genes]
+    pred_common = pred_adata[:, common_genes]
+
+    # 2) require expression in each adata
+    gt_nnz   = _nnz_per_gene(gt_common.X)
+    pred_nnz = _nnz_per_gene(pred_common.X)
+    keep_mask = (gt_nnz >= min_expr_cells) & (pred_nnz >= min_expr_cells)
+
+    if not np.any(keep_mask):
+        raise ValueError("No genes pass the expression filter in both adatas.")
+
+    # 3) return filtered .X matrices and the kept gene names (same order)
+    gt_X_filtered   = gt_common[:, keep_mask].X
+    pred_X_filtered = pred_common[:, keep_mask].X
+    kept_genes = common_genes[keep_mask]
+    if sp.issparse(gt_X_filtered):
+        gt_X_filtered = gt_X_filtered.todense()
+    if sp.issparse(pred_X_filtered):
+        pred_X_filtered = pred_X_filtered.todense()
+
+    return gt_X_filtered.tolist(), pred_X_filtered.tolist(), kept_genes
+
+
 
 
 import numpy as np
@@ -128,7 +165,7 @@ import tqdm
 from scipy.spatial import cKDTree
 from scipy.stats import pearsonr
 
-def soft_correlation(gt_expressions, gt_positions, pred_expressions, pred_positions, radius=None, k=0, sample=None):
+def soft_correlation(gt_adata, gt_positions, pred_adata, pred_positions, radius=None, k=0, sample=None):
     """
     gt_expressions, pred_expressions: list or array of gene expression vectors (shape [num_cells, num_genes])
     gt_positions, pred_positions: list or array of positions (shape [num_cells, 2] or [num_cells, 3])
@@ -136,7 +173,7 @@ def soft_correlation(gt_expressions, gt_positions, pred_expressions, pred_positi
     k: number of neighbors to consider (if k>0)
     sample: if provided, percentage of gt_positions to sample
     """
-
+    gt_expressions, pred_expressions, genes = intersect_and_filter_X(gt_adata, pred_adata)
     gt_positions = np.array(gt_positions)
     pred_positions = np.array(pred_positions)
     gt_expressions = np.array(gt_expressions)
@@ -189,7 +226,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 import tqdm
 
-def soft_precision(gt_expressions, gt_positions, pred_expressions, pred_positions, radius=None, k=0, sample=None):
+def soft_precision(gt_adata, gt_positions, pred_adata, pred_positions, radius=None, k=0, sample=None):
     """
     gt_expressions, pred_expressions: array of shape [num_cells, num_genes]
     gt_positions, pred_positions: array of shape [num_cells, 2] or [num_cells, 3]
@@ -197,6 +234,7 @@ def soft_precision(gt_expressions, gt_positions, pred_expressions, pred_position
     k: number of neighbors to consider (if k>0)
     sample: if provided, percentage of gt_positions to sample
     """
+    gt_expressions, pred_expressions, genes = intersect_and_filter_X(gt_adata, pred_adata)
     gt_positions = np.asarray(gt_positions)
     pred_positions = np.asarray(pred_positions)
     gt_expressions = np.asarray(gt_expressions)

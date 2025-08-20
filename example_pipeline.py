@@ -15,7 +15,7 @@ torch.manual_seed(42)
 torch.cuda.manual_seed_all(42)
 import copy, os, pandas as pd, json
 
-slice_data_loader = SliceDataLoader(mode="intra2_trial",label="subclass")
+slice_data_loader = SliceDataLoader(mode="intra2_hole",label="subclass")
 slice_data_loader.prepare()
 
 location_model = BiologicalModel2(slice_data_loader.train_slices)
@@ -25,11 +25,7 @@ location_model.fit()
 celltype_model = CelltypeModel(slice_data_loader.train_slices,slice_data_loader.gene_exp_model.num_tokens, val_slice=slice_data_loader.val_slices[0], epochs=500,learning_rate=0.001, batch_size=1024, device="cuda")
 
 # region_model.fit()
-celltype_model.load_model("best_model.pt")
-
-
-
-
+celltype_model.load_model("model_checkpoints/best_model_intra2hole.pt")
 
 OUT_CSV = "inference_results_intra2_trial.csv"
 
@@ -53,7 +49,7 @@ base = {
     "subclass_inference_type": "majority_baseline",
     "homogenize_subclass": True,
     "infer_gene_expression": True,
-    "expression_inference_type": "lookup",
+    "expression_inference_type": "model",
 }
 
 grid = [
