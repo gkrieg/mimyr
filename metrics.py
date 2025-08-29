@@ -36,7 +36,8 @@ from scipy.spatial import cKDTree
 import tqdm
 def one_hot_encode(celltypes):
     unique_types = list(set(celltypes))
-    encoding_dict = {ctype: np.eye(len(unique_types))[i] for i, ctype in enumerate(unique_types)}
+    I = np.eye(len(unique_types), dtype=np.float32)
+    encoding_dict = {ctype: I[i] for i, ctype in enumerate(unique_types)}
     return encoding_dict, len(unique_types)
 
 def soft_accuracy(gt_celltypes, gt_positions, pred_celltypes, pred_positions, radius=None, k=0, return_list=False, return_percent=False, sample=None):
