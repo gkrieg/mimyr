@@ -37,7 +37,7 @@ class SliceDataLoader:
         self.gene_exp_model=None
         self.density_model=None
 
-    def load_intra_slices(self, fast=False):
+    def load_intra_slices(self, fast=False, fast_select=None):
         # Load only slices1
         input_dir = self.input_dirs["type1"]
         sorted_slices1 = [
@@ -55,6 +55,8 @@ class SliceDataLoader:
         ]
         if fast:
             slices1 = [sc.read_h5ad(os.path.join(input_dir, fname)) for i,fname in enumerate(sorted_slices1) if i in [26,27,28,29]]
+        elif fast_select:
+            slices1 = [sc.read_h5ad(os.path.join(input_dir, fname)) for i,fname in enumerate(sorted_slices1) if i in [fast_select-1,fast_select,fast_select+1]]
         else:
             slices1 = [sc.read_h5ad(os.path.join(input_dir, fname)) for fname in sorted_slices1]
         return slices1
@@ -211,6 +213,164 @@ class SliceDataLoader:
             self.fine_tune_test_slices = None
         
         
+
+        elif self.mode == "rq1":
+            # Only load slices1
+            slices = self.load_intra_slices()
+
+            # Alignment
+            self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
+            self.density_model.fit()
+            aligned_slices = self.density_model.get_common_coordinate_locations()
+
+            # Tokenization
+            self.gene_exp_model = GeneExpModel(aligned_slices, label=self.label)
+            self.gene_exp_model.fit()
+            slices_tokenized = self.gene_exp_model.get_tokenized_slices()
+
+            # Manual split
+            test_indices = [43, 34, 8, 16, 29]
+            val_indices = [6, 28, 44, 14]
+
+            test_slices = [slices_tokenized[i] for i in test_indices]
+            val_slices = [slices_tokenized[i] for i in val_indices]
+
+            # Train = everything except test + val
+            train_indices = [i for i in range(len(slices_tokenized))
+                            if i not in test_indices and i not in val_indices]
+            train_slices = [slices_tokenized[i] for i in train_indices]
+
+            self.train_slices = train_slices
+            self.val_slices = val_slices
+            self.test_slices = test_slices
+
+            # references: you previously picked [27, 29], keep or adjust as needed
+            # References = neighbors (-1, +1) of test slices, if valid
+            ref_indices = []
+            for i in test_indices:
+                if i - 1 >= 0:
+                    ref_indices.append(i - 1)
+                if i + 1 < len(slices_tokenized):
+                    ref_indices.append(i + 1)
+
+            # remove duplicates, just in case
+            ref_indices = sorted(set(ref_indices))
+            self.reference_slices = [slices_tokenized[i] for i in ref_indices]
+
+
+            # No fine-tuning slices in intra mode
+            self.fine_tune_train_slices = None
+            self.fine_tune_val_slices = None
+            self.fine_tune_test_slices = None
+
+
+        elif "single_slice" in self.mode:
+            # Only load slices1
+            slices = self.load_intra_slices(fast_select=int(self.mode[-2:]))
+
+            # Alignment
+            self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
+            self.density_model.fit()
+            aligned_slices = self.density_model.get_common_coordinate_locations()
+
+            # Tokenization
+            self.gene_exp_model = GeneExpModel(aligned_slices, label=self.label)
+            self.gene_exp_model.fit()
+            slices_tokenized = self.gene_exp_model.get_tokenized_slices()
+
+            # Manual split
+            val_slice = None
+            print(self.mode[-2:])
+            test_slice = slices_tokenized[1]
+            # train_slices = slices_tokenized[:28] + slices_tokenized[30:]
+
+            self.train_slices = [slices_tokenized[0], slices_tokenized[2]]
+            self.val_slices = [slices_tokenized[0], slices_tokenized[2]]
+            self.test_slices = [test_slice]
+            self.reference_slices = [slices_tokenized[0], slices_tokenized[2]]
+
+            # No fine-tuning slices in intra mode
+            self.fine_tune_train_slices = None
+            self.fine_tune_val_slices = None
+            self.fine_tune_test_slices = None
+
+
+        elif self.mode == "intra2_trial":
+            # Only load slices1
+            slices = self.load_intra_slices()
+
+            # Alignment
+            self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
+            self.density_model.fit()
+            aligned_slices = self.density_model.get_common_coordinate_locations()
+
+            # Tokenization
+            self.gene_exp_model = GeneExpModel(aligned_slices, label=self.label)
+            self.gene_exp_model.fit()
+            slices_tokenized = self.gene_exp_model.get_tokenized_slices()
+
+            # Manual split
+            val_slice = slices_tokenized[28]
+            test_slice = slices_tokenized[29]
+            train_slices = slices_tokenized[:28] + slices_tokenized[30:]
+
+            self.train_slices = train_slices
+            self.val_slices = [val_slice]
+            self.test_slices = [test_slice]
+            self.reference_slices = [slices_tokenized[27],slices_tokenized[28],slices_tokenized[30],slices_tokenized[31]]
+
+            # No fine-tuning slices in intra mode
+            self.fine_tune_train_slices = None
+            self.fine_tune_val_slices = None
+            self.fine_tune_test_slices = None
+
+
+        elif self.mode == "intra2_trial_hole":
+            # Only load slices1
+            slices = self.load_intra_slices()
+
+            # Alignment
+            self.density_model = AlignementModel(
+                slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True
+            )
+            self.density_model.fit()
+            aligned_slices = self.density_model.get_common_coordinate_locations()
+
+            # Tokenization
+            self.gene_exp_model = GeneExpModel(aligned_slices, label=self.label)
+            self.gene_exp_model.fit()
+            slices_tokenized = self.gene_exp_model.get_tokenized_slices()
+
+            # Manual split: hold out 1000-cell central hole from slice 28
+            val_slice = slices_tokenized[28]
+            slice28 = slices_tokenized[29]
+
+            # --- Create a central hole of 1000 cells based on 3D center ---
+            coords = slice28.obsm["aligned_spatial"]  # shape (n_cells, 3)
+            center = coords.mean(axis=0)
+            dists = ((coords - center) ** 2).sum(axis=1)
+            sorted_idxs = dists.argsort()
+
+            hole_idxs = sorted_idxs[:1000]
+            keep_idxs = sorted_idxs[1000:]
+
+            slice28_hole = slice28[hole_idxs].copy()
+            slice28_rest = slice28[keep_idxs].copy()
+
+            # Construct splits
+            train_slices = (
+                slices_tokenized[:28] + slices_tokenized[30:] + [slice28_rest]
+            )
+
+            self.train_slices = train_slices
+            self.val_slices = [val_slice]
+            self.test_slices = [slice28_hole]
+            self.reference_slices = [slices_tokenized[27],slices_tokenized[28],slices_tokenized[30],slices_tokenized[31]]
+
+            # No fine-tuning slices in intra mode
+            self.fine_tune_train_slices = None
+            self.fine_tune_val_slices = None
+            self.fine_tune_test_slices = None
 
         elif self.mode == "intra3":
             # Only load slices1

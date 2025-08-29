@@ -279,21 +279,25 @@ class CelltypeModel(nn.Module):
 
     def evaluate_val(self):
         with torch.no_grad():
-            val_x = torch.tensor(self.val_slice.obsm["aligned_spatial"], dtype=torch.float32).to(self.device)
-            # density_tensor = torch.tensor(self.val_slice.obs["entropy"], dtype=torch.float32).to(self.device)
+            val_x_full = torch.tensor(self.val_slice.obsm["aligned_spatial"], dtype=torch.float32).to(self.device)
+            n = val_x_full.shape[0]
+            sample_size = max(1, n // 100)  # at least 1
+            idx = np.random.choice(n, sample_size, replace=False)
 
-            # val_x = torch.cat([val_x,density_tensor.unsqueeze(-1)],dim=-1)
+            val_x = val_x_full[idx]
+            # density_tensor = torch.tensor(self.val_slice.obs["entropy"].to_numpy(), dtype=torch.float32).to(self.device)[idx]
+            # val_x = torch.cat([val_x, density_tensor.unsqueeze(-1)], dim=-1)
 
             outputs = self.model(val_x)
             probs = torch.softmax(outputs, dim=1).cpu().numpy()
             preds = [np.random.choice(probs.shape[1], p=probs[i]) for i in range(probs.shape[0])]
 
-        gt_celltypes = self.val_slice.obs["token"].to_numpy().tolist()
-        gt_positions = self.val_slice.obsm["aligned_spatial"]
-        pred_positions = self.val_slice.obsm["aligned_spatial"]
+        gt_celltypes = self.val_slice.obs["token"].to_numpy()[idx].tolist()
+        gt_positions = self.val_slice.obsm["aligned_spatial"][idx]
+        pred_positions = self.val_slice.obsm["aligned_spatial"][idx]
         pred_celltypes = preds
 
-        return soft_accuracy(gt_celltypes, gt_positions, pred_celltypes, pred_positions, k=20, sample=50)
+        return soft_accuracy(gt_celltypes, gt_positions, pred_celltypes, pred_positions, k=20)
 
     def get_token_distr(self, index):
         self.model.eval()
