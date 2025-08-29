@@ -152,6 +152,65 @@ class SliceDataLoader:
             self.fine_tune_val_slices = None
             self.fine_tune_test_slices = None
 
+        elif self.mode == "rq1":
+            # Only load slices1
+            slices = self.load_intra_slices()
+
+            # Alignment
+            self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
+            self.density_model.fit()
+            aligned_slices = self.density_model.get_common_coordinate_locations()
+
+            # Tokenization
+            self.gene_exp_model = GeneExpModel(aligned_slices, label=self.label)
+            self.gene_exp_model.fit()
+            slices_tokenized = self.gene_exp_model.get_tokenized_slices()
+
+            # Manual split
+            # Manual split
+            test_indices = [43, 34, 8, 16, 29]
+            val_indices = [6, 28, 44, 14]
+
+            test_slices = [slices_tokenized[i] for i in test_indices]
+            val_slices = [slices_tokenized[i] for i in val_indices]
+
+            # Train = everything except test + val
+            train_indices = [i for i in range(len(slices_tokenized))
+                            if i not in test_indices and i not in val_indices]
+            train_slices = [slices_tokenized[i] for i in train_indices]
+
+            ref_indices = []
+            for i in test_indices:
+                if i - 1 >= 0:
+                    ref_indices.append(i - 1)
+                if i + 1 < len(slices_tokenized):
+                    ref_indices.append(i + 1)
+
+            # remove duplicates, just in case
+            ref_indices = sorted(set(ref_indices))
+            self.reference_slices = [slices_tokenized[i] for i in ref_indices]
+            
+
+            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse.pt')
+            edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
+            for s in train_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+            for s in reference_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+            val_slice = harmonize_dataset(val_slice, meta_info, edges)
+            test_slice = harmonize_dataset(test_slice, meta_info, edges)
+
+            self.train_slices = train_slices
+            self.val_slices = [val_slice]
+            self.test_slices = [test_slice]
+            # self.reference_slices = reference_slices
+
+            # No fine-tuning slices in intra mode
+            self.fine_tune_train_slices = None
+            self.fine_tune_val_slices = None
+            self.fine_tune_test_slices = None
+        
+        
 
         elif self.mode == "intra3":
             # Only load slices1
