@@ -2,12 +2,13 @@ from transformers import PreTrainedTokenizer
 
 class scMulanTokenizer(PreTrainedTokenizer):
     def __init__(self, chars):
-        super().__init__()
 
         self.chars = chars
         self.stoi = { ch:i for i,ch in enumerate(self.chars) }
         self.itos = { i:ch for i,ch in enumerate(self.chars) }
 
+        super().__init__()    
+    
     def _tokenize(self, text):
         # Implement your tokenization method here
         return [self.stoi[c] for c in text.split('##')]
