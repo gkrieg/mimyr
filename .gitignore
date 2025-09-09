@@ -5,3 +5,7 @@ dump
 ops
 *.csv
 *.out
+experimentation
+wandb
+model_checkpoints
+*.pt

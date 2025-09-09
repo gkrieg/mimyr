@@ -71,7 +71,7 @@ class KDEMixture(nn.Module):
             weight_subset = self.weights.to(device)
 
         # Scale z-axis for sharper or flatter KDE
-        points_scaled = points.clone()
+        points_scaled = points
         subset_scaled = spatial_subset.clone()
         if self.d >= 3:
             points_scaled[:, 2] *= self.z_factor
@@ -80,6 +80,102 @@ class KDEMixture(nn.Module):
         distances = torch.cdist(points_scaled, subset_scaled)
         kernels = torch.exp(-distances ** 2 / (2 * self.bandwidth.to(device) ** 2))
         return torch.sum(weight_subset * kernels, dim=-1)
+
+
+    def forward(
+        self,
+        points,
+        sample_frac: float = 1.0,
+        eps: float = 1e-12,
+        p_bs: int = 2*2048,         # points batch size
+        s_bs: int = 2*4096,         # subset batch size
+        normalize_weights: bool = True,
+        rescale_grad_to_original_coords: bool = True,
+    ):
+        device, dtype = points.device, points.dtype
+
+        # ----- choose subset -----
+        if sample_frac < 1.0:
+            k = max(1, int(self.N * sample_frac))
+            idx = torch.randperm(self.N, device=self.spatial_data.device)[:k]
+            spatial_subset = self.spatial_data[idx].to(device=device, dtype=dtype)
+            weight_subset = self.weights[idx].to(device=device, dtype=dtype)
+        else:
+            spatial_subset = self.spatial_data.to(device=device, dtype=dtype)
+            weight_subset = self.weights.to(device=device, dtype=dtype)
+
+        if normalize_weights:
+            weight_subset = weight_subset / (weight_subset.sum() + eps)
+
+        # ----- scaling (z-axis) -----
+        points_scaled = points.clone()
+        subset_scaled = spatial_subset.clone()
+        if self.d >= 3:
+            points_scaled[:, 2] *= self.z_factor
+            subset_scaled[:, 2] *= self.z_factor
+
+        P = points_scaled.shape[0]
+        K = subset_scaled.shape[0]
+        bw2 = (self.bandwidth ** 2).to(device=device, dtype=dtype)
+        inv_bw2 = 1.0 / bw2
+
+        # outputs
+        fvals = torch.zeros(P, device=device, dtype=dtype)
+        grad  = torch.zeros(P, self.d, device=device, dtype=dtype)
+
+        # ----- two-axis tiling -----
+        for p_start in range(0, P, p_bs):
+            p_end = min(p_start + p_bs, P)
+            p_chunk = points_scaled[p_start:p_end]            # (bp, d)
+
+            f_chunk = torch.zeros(p_end - p_start, device=device, dtype=dtype)
+            g_chunk = torch.zeros(p_end - p_start, self.d, device=device, dtype=dtype)
+
+            for s_start in range(0, K, s_bs):
+                s_end = min(s_start + s_bs, K)
+                s_chunk = subset_scaled[s_start:s_end]        # (bs, d)
+                w_chunk = weight_subset[s_start:s_end]        # (bs,)
+
+                # (bp, bs, d)
+                diffs = p_chunk[:, None, :] - s_chunk[None, :, :]
+                # (bp, bs)
+                sq_dist = (diffs ** 2).sum(dim=-1)
+
+                # (bp, bs)
+                kernels = torch.exp(-sq_dist * (0.5 * inv_bw2))
+
+                # accumulate f
+                # (bp,)
+                f_chunk = f_chunk + (kernels * w_chunk[None, :]).sum(dim=1)
+
+                # accumulate grad
+                # -(diffs / bw^2) * kernel * w
+                # (bp, bs, d)
+                contrib = -(diffs * inv_bw2) * kernels[..., None] * w_chunk[None, :, None]
+                # (bp, d)
+                g_chunk = g_chunk + contrib.sum(dim=1)
+
+                # free temps ASAP
+                del diffs, sq_dist, kernels, contrib
+
+            # write back
+            fvals[p_start:p_end] = f_chunk
+            grad[p_start:p_end]  = g_chunk
+
+            del f_chunk, g_chunk
+
+        # gradient of log f
+        log_grad = grad / (fvals[:, None] + eps)
+
+        # If you scaled z during KDE, adjust gradient back to ORIGINAL coords:
+        # p_scaled = diag(1,1,z_factor) * p  => grad_p = A^T * grad_p_scaled
+        if self.d >= 3 and rescale_grad_to_original_coords:
+            grad[:, 2]     *= self.z_factor
+            log_grad[:, 2] *= self.z_factor
+
+        return fvals, log_grad
+
+
 
     def log_prob(self, points, sample_frac=1.0):
         density = self.forward(points, sample_frac=sample_frac)
@@ -142,7 +238,7 @@ class KDEMixture(nn.Module):
 
 
 
-class BiologicalModel2():
+class BiologicalModel2(nn.Module):
     def __init__(self, slices, z_posn=None, pin_key="region", bandwidth=0.001, z_factor=1):
         super(BiologicalModel2, self).__init__()
         self.bandwidth=bandwidth
@@ -165,6 +261,9 @@ class BiologicalModel2():
 
     def fit(self):
         self.model=KDEMixture(self.xyz,bandwidth=self.bandwidth,z_factor=self.z_factor)
+
+    def forward(self, x, sample_frac=1.0):
+        return self.model(x, sample_frac=sample_frac)
     
     
     def sample(self,z,size=1000):
