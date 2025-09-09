@@ -5,9 +5,9 @@ from utils.hf_tokenizer import scMulanTokenizer
 from scMulan import scMulan, fine_tuning, generate_prompt_for_cg
 import inspect
 from typing import Tuple, List
-# from scMulan import generate_cellGenesis
 import pickle as pkl
 import scipy.sparse as sp
+# from scMulan import generate_cellGenesis
 
 import pandas as pd
 import numpy as np

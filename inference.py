@@ -134,6 +134,8 @@ class Inferernce:
         import pandas as pd
 
         if self.expression_inference_type == "averaging":
+            print(adatas)
+            print(adata_sampled)
             rows = np.array(self.token_mapping_model.get_gene_exp_from_token(adata_sampled.obs["token"].tolist()))[:,0]
             print(rows.shape)
             obs = adata_sampled.obs.copy()
@@ -222,7 +224,7 @@ class Inferernce:
             for h in ['class', 'subclass','supertype','cluster']:
                 adata_sampled.obs[h] = 'na'
             for cell in adata_sampled.obs_names:
-                c, sc, st, cl = hierarchy[('subclass',adata_sampled.obs.loc[cell, 'readable_label'])]
+                c, sc, st, cl = hierarchy[('cluster',adata_sampled.obs.loc[cell, 'readable_label'])]
                 for h, v in zip(['class', 'subclass','supertype','cluster'], [c, sc, st, cl]):
                     adata_sampled.obs.loc[cell, h] = v
             # Get binned x,y,z
@@ -247,7 +249,7 @@ class Inferernce:
 
             # 4) re-create
             adata_sub = AnnData(X=X_sparse, obs=obs, var=var, obsm=adata_sampled.obsm.copy())
-            ckp_path = '/compute/oven-0-13/skrieger/mouse-mediummodelscrna/epoch30_model.pt'
+            ckp_path = '/compute/oven-0-13/skrieger/mouse-mediummodelscrna/epoch110_model.pt'
             scml = model_generate(ckp_path=ckp_path,
                                 adata=adata_sub,
                                 meta_info=meta_info,
@@ -291,7 +293,7 @@ class Inferernce:
             adata_sampled = self.infer_subclass(xyz_samples)
         else:
             adata_sampled = new_tissue
-        # Need to bin the location info and recreate the 4 hierarchy, along with the other metadata things
+            adata_sampled.obsm['spatial'] = new_tissue.obs.loc[:,['z_ccf','y_ccf','x_ccf']].values
         if self.do_infer_gene_expression:
             adata_sampled = self.infer_expression(adatas, adata_sampled)
 

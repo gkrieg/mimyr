@@ -563,14 +563,14 @@ class scMulan:
                 gen_vals = generated_vals[b].tolist()
                 gen_vals_binned = generated_vals_binned[b].tolist()
     
-                new_ids = gen_seq[plen:]
-                new_vals = gen_vals[plen:]
+                new_ids = gen_seq#[plen:]
+                new_vals = gen_vals#[plen:]
                 gene_tokens = self.tokenizer.convert_ids_to_tokens(new_ids)
     
                 row = tokens_and_vals_to_expression_row(
                     var_names=self.adata.var_names.tolist(),
                     gene_tokens=gene_tokens,
-                    gene_tokens_int=gen_seq,
+                    gene_tokens_int=new_ids,
                     new_vals=new_vals,
                     return_series=False
                 )
@@ -689,7 +689,7 @@ def model_generate(ckp_path: str,
     else:
         bin_edges = None
     gptconf.dropout = 0.0
-    print(gptconf)
+    # print(gptconf)
 
     if use_kv_cache == False:
         model = scMulanModel(gptconf)

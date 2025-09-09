@@ -241,6 +241,7 @@ def main():
     if args.new_expression_size is not None and args.from_finetuned:
         ckp['model_args']['expression_level'] = args.new_expression_size
     gptconf = MulanConfig(**ckp['model_args'])
+    print(gptconf)
     ModelClass = scMulanModel
     model = ModelClass(gptconf)
     # device = torch.device(args.device)
