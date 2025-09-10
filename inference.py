@@ -51,71 +51,64 @@ class Inferernce:
         self.token_mapping_model = slice_data_loader.gene_exp_model
         self.location_model = location_model
         self.subclass_model = subclass_model
-        self.do_infer_location = config["infer_location"]
-        self.location_inference_type = config["location_inference_type"]
-        self.do_infer_subclass = config["infer_subclass"]
-        self.subclass_inference_type = config["subclass_inference_type"]
-        self.homogenize_subclass = config["homogenize_subclass"]
+        self.config = config
 
-        self.do_infer_gene_expression = config["infer_gene_expression"]
-        self.expression_inference_type = config["expression_inference_type"]
+    # === LOCATION ===
+    def infer_location(self, adata, new_tissue):
+        loc_type = self.config["location_inference_type"]
 
-        # self.do_infer_subclass = self.do_infer_subclass or self.do_infer_location
-        # self.do_infer_gene_expression = (
-        #     self.do_infer_gene_expression
-        #     or self.do_infer_location
-        #     or self.do_infer_subclass
-        # )
-
-    def infer_location(self, new_tissue):
-        if self.location_inference_type == "model":
-            return self.location_model.sample_slice_conditionally(
+        if loc_type == "model":
+            xyz = np.asarray(self.location_model.sample_slice_conditionally(
                 new_tissue, size=len(new_tissue), interior=True
-            )
+            ))
+        elif loc_type == "closest_slice":
+            closest_ref_slice = np.argmin([ref_slice.obsm["aligned_spatial"].mean(-1)[-1] for ref_slice in self.slice_data_loader.reference_slices])
+            xyz = self.slice_data_loader.reference_slices[closest_ref_slice].obsm["aligned_spatial"].copy()
 
-    def infer_subclass(self, xyz_samples):
-        if self.subclass_inference_type == "majority_baseline":
-            def to_numpy(x):
-                if isinstance(x, np.ndarray):
-                    return x
-                try:
-                    return x.cpu().numpy()
-                except:
-                    return np.asarray(x)
+        xyz = self.slice_data_loader.reference_slices[closest_ref_slice].obsm["aligned_spatial"].copy()
 
-            test_np = to_numpy(xyz_samples)
-            ref_np = to_numpy(ad.concat(self.slice_data_loader.reference_slices).obsm["aligned_spatial"])
-            labels_np = to_numpy(ad.concat(self.slice_data_loader.reference_slices).obs["token"]).astype(int)
+        n = adata.n_obs
+        if xyz.shape[0] > n:
+            idx = np.random.choice(xyz.shape[0], size=n, replace=False)
+            xyz = xyz[idx]
+        elif xyz.shape[0] < n:
+            idx = np.random.choice(xyz.shape[0], size=n, replace=True)
+            xyz = xyz[idx]
 
-            # Build kNN index on reference locations
+        adata.obsm["spatial"] = np.asarray(xyz)
+
+        return adata 
+
+    # === CLUSTER / SUBCLASS ===
+    def infer_cluster(self, adata, new_tissue):
+        clust_type = self.config["cluster_inference_type"]
+
+        xyz_samples = np.asarray(adata.obsm["spatial"])
+
+        if clust_type == "majority_baseline":
+            ref_np = np.asarray(ad.concat(self.slice_data_loader.reference_slices).obsm["aligned_spatial"])
+            labels_np = np.asarray(ad.concat(self.slice_data_loader.reference_slices).obs["token"]).astype(int)
+
             nbrs = NearestNeighbors(n_neighbors=20).fit(ref_np)
-            distances, indices = nbrs.kneighbors(test_np)  # indices shape = (N_test, k)
+            _, indices = nbrs.kneighbors(xyz_samples)
 
-            n_test = test_np.shape[0]
-            preds = np.zeros(n_test, dtype=int)
-            probs = []
-            for i in range(n_test):
-                neighbor_idxs = indices[i]                          # shape (k,)
-                neighbor_labels = labels_np[neighbor_idxs]          # shape (k,)
-                # Compute majority vote (mode)
-                counts = np.bincount(neighbor_labels)
-                preds
-                
+            preds = np.zeros(len(xyz_samples), dtype=int)
+            for i, neigh_idxs in enumerate(indices):
+                counts = np.bincount(labels_np[neigh_idxs])
                 preds[i] = np.argmax(counts)
 
-            adata_sampled = ad.AnnData(X=np.zeros((xyz_samples.shape[0], 1)))
-            adata_sampled.obsm["spatial"] = xyz_samples.cpu().numpy()
-            adata_sampled.obs["token"] = preds
+            adata.obs["token"] = preds
 
-        if self.subclass_inference_type == "model":
+        elif clust_type == "model":
+            xyz_samples_t = torch.tensor(xyz_samples, dtype=torch.float32, device="cuda")
             adata_sampled, preds, probs = generate_anndata_from_samples(
                 self.subclass_model,
-                xyz_samples,
-                xyz_samples.device,
+                xyz_samples_t,
+                xyz_samples_t.device,
                 sample_from_probs=True,
                 use_conditionals=False,
-                xyz_labels=None,#new_tissue.obs["token"],
-                num_classes=max(self.subclass_model.y)+1,
+                xyz_labels=None,
+                num_classes=max(self.subclass_model.y) + 1,
                 gibbs=False,
                 n_iter=1,
                 use_budget=False,
@@ -128,6 +121,7 @@ class Inferernce:
             if k in adata_sampled.obs.columns:
                 del adata_sampled.obs[k]
         return adata_sampled
+
 
     def infer_expression(self, adatas, adata_sampled):
         import numpy as np
@@ -278,23 +272,36 @@ class Inferernce:
             print(adata)
             return adata
 
+
+    # === ORCHESTRATOR ===
     def run_inference(self, adatas):
         new_tissue = ad.concat(adatas)
-        device = "cuda"
-        if self.do_infer_location:
-            xyz_samples = torch.tensor(
-                self.infer_location(new_tissue), dtype=torch.float32
-            ).to(device)
-        else:
-            xyz_samples = torch.tensor(
-                new_tissue.obsm["aligned_spatial"], dtype=torch.float32
-            ).to(device)
-        if self.do_infer_subclass:
-            adata_sampled = self.infer_subclass(xyz_samples)
-        else:
-            adata_sampled = new_tissue
-            adata_sampled.obsm['spatial'] = new_tissue.obs.loc[:,['z_ccf','y_ccf','x_ccf']].values
-        if self.do_infer_gene_expression:
-            adata_sampled = self.infer_expression(adatas, adata_sampled)
 
-        return adata_sampled
+        # start with empty shell
+        adata = AnnData(obs=pd.DataFrame(index=new_tissue.obs.index))
+
+        # step 1: location
+        if "end" in self.config["location_inference_type"]:
+            return adata
+        elif "skip" in self.config["location_inference_type"]:
+            adata.obsm["aligned_spatial"] = new_tissue.obsm["aligned_spatial"].copy()
+        else:
+            adata = self.infer_location(adata, new_tissue)
+
+        # step 2: cluster
+        if "end" in self.config["cluster_inference_type"]:
+            return adata
+        elif "skip" in self.config["cluster_inference_type"]:
+            adata.obs["token"] = new_tissue.obs["token"].copy()
+            adata.obs["spatial"] = new_tissue.obs["aligned_spatial"].copy()
+        else:
+            adata = self.infer_cluster(adata, new_tissue)
+
+        if "end" in self.config["expression_inference_type"]:
+            return adata
+        elif "skip" in self.config["expression_inference_type"]:
+            adata.X = new_tissue.X.copy()
+        else:
+            adata = self.infer_expression(adata, new_tissue)
+
+        return adata

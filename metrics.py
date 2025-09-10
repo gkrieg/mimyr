@@ -1,39 +1,20 @@
-# import numpy as np
-# from sklearn.metrics.pairwise import cosine_similarity
-
-# def one_hot_encode(celltypes):
-#     unique_types = list(set(celltypes))
-#     encoding_dict = {ctype: np.eye(len(unique_types))[i] for i, ctype in enumerate(unique_types)}
-#     return encoding_dict, len(unique_types)
-
-# def get_neighbors(gt_positions, target_pos, radius):
-#     return [i for i, pos in enumerate(gt_positions) if np.linalg.norm(np.array(pos) - np.array(target_pos)) <= radius]
-
-# def soft_accuracy(gt_celltypes, gt_positions, pred_celltypes, pred_positions, radius):
-#     encoding_dict, num_classes = one_hot_encode(gt_celltypes + pred_celltypes)
-#     result = []
-    
-#     for i, pos in enumerate(gt_positions):
-#         gt_neighbors = get_neighbors(gt_positions, pos, radius)
-#         pred_neighbors = get_neighbors(pred_positions, pos, radius)
-        
-#         gt_encoding_sum = np.sum([encoding_dict[gt_celltypes[j]] for j in gt_neighbors], axis=0)
-#         pred_encoding_sum = np.sum([encoding_dict[pred_celltypes[j]] for j in pred_neighbors], axis=0)
-        
-#         gt_distribution = gt_encoding_sum / np.linalg.norm(gt_encoding_sum) if np.linalg.norm(gt_encoding_sum) != 0 else np.zeros(num_classes)
-#         pred_distribution = pred_encoding_sum / np.linalg.norm(pred_encoding_sum) if np.linalg.norm(pred_encoding_sum) != 0 else np.zeros(num_classes)
-        
-#         similarity = cosine_similarity(gt_distribution.reshape(1, -1), pred_distribution.reshape(1, -1))[0, 0]
-#         result.append(similarity)
-    
-#     return np.mean(result) if result else 0.0
-
-
 import random
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
 from scipy.spatial import cKDTree
 import tqdm
+from scipy.spatial import Delaunay
+import numpy as np
+import numpy as np
+from scipy.spatial import cKDTree
+from tqdm import tqdm
+
+
+import numpy as np
+from scipy.spatial import cKDTree
+from tqdm import tqdm
+
+
 def one_hot_encode(celltypes):
     unique_types = list(set(celltypes))
     I = np.eye(len(unique_types), dtype=np.float32)
@@ -104,6 +85,135 @@ def soft_accuracy(gt_celltypes, gt_positions, pred_celltypes, pred_positions, ra
         return result
 
     return np.mean(result) if result else 0.0
+
+
+
+
+def grid_density_l1_distance(gt_positions, pred_positions, radius=None, k=0, 
+                              grid_size=50, return_list=False):
+    """
+    Estimate weighted L1 distance between two distributions by evaluating
+    density differences on a regular grid of points spanning the data space.
+    
+    Parameters
+    ----------
+    gt_positions : array-like, shape (n_gt, d)
+        Ground-truth positions.
+    pred_positions : array-like, shape (n_pred, d)
+        Predicted positions.
+    radius : float, optional
+        Radius for density estimation (used if k == 0).
+    k : int, optional
+        k for kNN density estimation. If > 0, kNN mode is used.
+    grid_size : int, optional
+        Number of grid points per dimension.
+    return_list : bool, optional
+        If True, return list of per-grid-point distances. Otherwise return mean.
+    """
+    gt_positions = np.array(gt_positions)
+    pred_positions = np.array(pred_positions)
+
+    d = gt_positions.shape[1]
+    Vd = np.pi ** (d/2) / np.math.gamma(d/2 + 1)  # volume of unit d-ball
+    n_gt, n_pred = len(gt_positions), len(pred_positions)
+
+    # Build trees
+    gt_tree = cKDTree(gt_positions)
+    pred_tree = cKDTree(pred_positions)
+
+    # Grid bounding box
+    mins = np.minimum(gt_positions.min(axis=0), pred_positions.min(axis=0))
+    maxs = np.maximum(gt_positions.max(axis=0), pred_positions.max(axis=0))
+    grid_axes = [np.linspace(mins[i], maxs[i], grid_size) for i in range(d)]
+    mesh = np.meshgrid(*grid_axes, indexing="ij")
+    grid_points = np.stack([m.ravel() for m in mesh], axis=-1)
+
+    results = []
+
+    for i, pos in tqdm(list(enumerate(grid_points))):
+        if k > 0:
+            # kNN mode
+            gt_distances, _ = gt_tree.query(pos, k=k)
+            pred_distances, _ = pred_tree.query(pos, k=k)
+            r_gt = gt_distances[-1]
+            r_pred = pred_distances[-1]
+
+            p_hat = k / (n_gt * Vd * (r_gt ** d)) if r_gt > 0 else 0
+            q_hat = k / (n_pred * Vd * (r_pred ** d)) if r_pred > 0 else 0
+        else:
+            # Radius mode
+            gt_neighbors = gt_tree.query_ball_point(pos, radius)
+            pred_neighbors = pred_tree.query_ball_point(pos, radius)
+
+            k_gt = len(gt_neighbors)
+            k_pred = len(pred_neighbors)
+
+            p_hat = k_gt / (n_gt * Vd * (radius ** d)) if radius > 0 else 0
+            q_hat = k_pred / (n_pred * Vd * (radius ** d)) if radius > 0 else 0
+
+        results.append(abs(p_hat - q_hat))
+
+    return results if return_list else np.mean(results) if results else 0.0
+
+
+def weighted_l1_distance(gt_positions, pred_positions, radius=None, k=0, 
+                         return_list=False, sample=None):
+    """
+    Estimate weighted L1 distance between two distributions
+    represented by samples (gt_positions vs pred_positions).
+    
+    Uses kNN or radius-based neighborhood density estimates.
+    """
+    gt_positions = np.array(gt_positions)
+    pred_positions = np.array(pred_positions)
+
+    # Build trees for neighbor lookup
+    gt_tree = cKDTree(gt_positions)
+    pred_tree = cKDTree(pred_positions)
+
+    # Optionally subsample GT samples
+    if sample is not None:
+        percent = sample
+        n = int(len(gt_positions) * percent / 100)
+        indices = np.random.choice(len(gt_positions), size=n, replace=False)
+        samples = gt_positions[indices]
+    else:
+        samples = gt_positions
+
+    d = gt_positions.shape[1]  # dimension
+    Vd = np.pi ** (d/2) / np.math.gamma(d/2 + 1)  # volume of unit d-ball
+    n_gt, n_pred = len(gt_positions), len(pred_positions)
+
+    results = []
+
+    for i, pos in tqdm(list(enumerate(samples))):
+        if k > 0:
+            # kNN mode: get kth neighbor distance
+            gt_distances, _ = gt_tree.query(pos, k=k+1)  # include self
+            pred_distances, _ = pred_tree.query(pos, k=k)
+            r_gt = gt_distances[-1]  # k-th neighbor
+            r_pred = pred_distances[-1] if len(pred_distances) > 0 else np.inf
+
+            p_hat = k / (n_gt * Vd * (r_gt ** d)) if r_gt > 0 else 0
+            q_hat = k / (n_pred * Vd * (r_pred ** d)) if r_pred > 0 else 0
+
+        else:
+            # Radius mode: count neighbors within radius
+            gt_neighbors = gt_tree.query_ball_point(pos, radius)
+            pred_neighbors = pred_tree.query_ball_point(pos, radius)
+
+            k_gt = max(len(gt_neighbors) - 1, 0)  # exclude self
+            k_pred = len(pred_neighbors)
+
+            p_hat = k_gt / (n_gt * Vd * (radius ** d)) if radius > 0 else 0
+            q_hat = k_pred / (n_pred * Vd * (radius ** d)) if radius > 0 else 0
+
+        results.append(abs(p_hat - q_hat))
+
+        if i % 10000 == 0 and i > 0:
+            print("Running mean:", np.mean(results))
+
+    return results if return_list else np.mean(results) if results else 0.0
 
 
 
@@ -282,6 +392,69 @@ def soft_precision(gt_adata, gt_positions, pred_adata, pred_positions, radius=No
 
     return float(np.mean(precisions)) if precisions else 0.0
 
+
+
+
+def soft_f1(gt_adata, gt_positions, pred_adata, pred_positions, radius=None, k=0, sample=None):
+    """
+    gt_expressions, pred_expressions: array of shape [num_cells, num_genes]
+    gt_positions, pred_positions: array of shape [num_cells, 2] or [num_cells, 3]
+    radius: radius for neighbor search (if k=0)
+    k: number of neighbors to consider (if k>0)
+    sample: if provided, percentage of gt_positions to sample
+    """
+    gt_expressions, pred_expressions, genes = intersect_and_filter_X(gt_adata, pred_adata)
+    gt_positions = np.asarray(gt_positions)
+    pred_positions = np.asarray(pred_positions)
+    gt_expressions = np.asarray(gt_expressions)
+    pred_expressions = np.asarray(pred_expressions)
+
+    gt_tree = cKDTree(gt_positions)
+    pred_tree = cKDTree(pred_positions)
+
+    precisions = []
+    recalls = []
+    f1s = []
+
+    # sampling
+    if sample is not None:
+        n = int(len(gt_positions) * sample / 100)
+        idx = np.random.choice(len(gt_positions), size=n, replace=False)
+        samples = gt_positions[idx]
+    else:
+        samples = gt_positions
+
+    for i, pos in enumerate(tqdm(samples, desc="spots")):
+        # find neighbors
+        if k > 0:
+            _, gt_idx = gt_tree.query(pos, k=k+1)
+            _, pred_idx = pred_tree.query(pos, k=k+1)
+            gt_nbrs = gt_idx[1:]
+            pred_nbrs = pred_idx[1:]
+        else:
+            gt_nbrs = gt_tree.query_ball_point(pos, radius)
+            pred_nbrs = pred_tree.query_ball_point(pos, radius)
+
+        # sum expressions over neighbors
+        gt_sum = np.sum(gt_expressions[gt_nbrs], axis=0)
+        pred_sum = np.sum(pred_expressions[pred_nbrs], axis=0)
+
+        # compute precision: TP / (predicted positives)
+        pred_pos = pred_sum > 0
+        if pred_pos.sum() > 0:
+            true_pos = np.logical_and(pred_pos, gt_sum > 0).sum()
+            precisions.append(true_pos / pred_pos.sum())
+            recalls.append(true_pos / (gt_sum > 0).sum() if (gt_sum > 0).sum() > 0 else 0.0)
+            f1s.append(2 * precisions[-1] * recalls[-1] / (precisions[-1] + recalls[-1]) if (precisions[-1] + recalls[-1]) > 0 else 0.0)
+        else:
+            precisions.append(0.0)
+            recalls.append(0.0)
+            f1s.append(0.0)
+
+        if i and i % 10000 == 0:
+            print(f"Processed {i} spots...")
+
+    return float(np.mean(f1s)) if f1s else 0.0, float(np.mean(precisions)) if precisions else 0.0, float(np.mean(recalls)) if recalls else 0.0
 
 
 
@@ -500,3 +673,64 @@ def neighborhood_enrichment(
     # default: one scalar summary
     corr, _ = pearsonr(flat_gt, flat_pred)
     return corr
+
+
+
+
+
+from scipy.spatial import Delaunay
+import numpy as np
+
+def delaunay_colocalization(gt_celltypes, gt_positions, pred_celltypes, pred_positions, encoding_dict=None):
+    """
+    Build Delaunay graph for GT and Pred positions and compute L1 distance
+    between their edge-type count matrices.
+
+    Parameters
+    ----------
+    gt_celltypes : list[str]
+        Ground-truth cell type labels (length N).
+    gt_positions : array-like, shape (N, 2)
+        Ground-truth positions.
+    pred_celltypes : list[str]
+        Predicted cell type labels (length M).
+    pred_positions : array-like, shape (M, 2)
+        Predicted positions.
+    encoding_dict : dict, optional
+        Mapping from cell type to index. If None, builds internally.
+
+    Returns
+    -------
+    l1_distance : float
+        L1 distance (sum of absolute differences) between GT and Pred count matrices.
+    """
+
+    # Build encoding dict if not given
+    if encoding_dict is None:
+        all_cts = list(set(gt_celltypes) | set(pred_celltypes))
+        encoding_dict = {ct: i for i, ct in enumerate(all_cts)}
+    num_classes = len(encoding_dict)
+
+    def build_count_matrix(celltypes, positions):
+        tri = Delaunay(positions)
+        edges = set()
+        for simplex in tri.simplices:
+            for i in range(3):
+                a, b = simplex[i], simplex[(i + 1) % 3]
+                if a > b:
+                    a, b = b, a
+                edges.add((a, b))
+
+        count_matrix = np.zeros((num_classes, num_classes), dtype=int)
+        for a, b in edges:
+            ia, ib = encoding_dict[celltypes[a]], encoding_dict[celltypes[b]]
+            count_matrix[ia, ib] += 1
+            if ia != ib:
+                count_matrix[ib, ia] += 1  # symmetric
+        return count_matrix
+
+    gt_count_matrix = build_count_matrix(gt_celltypes, np.array(gt_positions))
+    pred_count_matrix = build_count_matrix(pred_celltypes, np.array(pred_positions))
+
+    # L1 distance
+    return np.abs(gt_count_matrix - pred_count_matrix).sum()
