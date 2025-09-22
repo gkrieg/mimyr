@@ -178,7 +178,7 @@ def get_generation_dataloader(
         pin_memory  = True,
     )
 
-def harmonize_dataset(adata, meta_info, coordfiles, organ='Brain', technology='M550', coord_suffix='_ccf', n_bins=100):
+def harmonize_dataset(adata, meta_info, coordfiles, organ='Brain', technology='M550', coord_suffix='_ccf', species='mouse', disease_state='healthy', n_bins=100):
     if adata.X.max() > 10:
         sc.pp.normalize_total(adata, target_sum=1e4) 
         sc.pp.log1p(adata)
@@ -194,7 +194,9 @@ def harmonize_dataset(adata, meta_info, coordfiles, organ='Brain', technology='M
         adata.obs[f'<{coord}>'] = bin_idxs
     adata.obs['organ'] = organ
     adata.obs['technology'] = technology
-    cols = ['<x>','<y>','<z>','organ', 'class', 'subclass','supertype','cluster', 'technology']
+    adata.obs['species'] = species
+    adata.obs['disease_state'] = disease_state
+    cols = ['<x>','<y>','<z>','organ', 'class', 'subclass','supertype','cluster', 'technology', 'species', 'disease_state']
     mask = adata.obs[cols].notnull().all(axis=1)
     adata = adata[mask].copy()
 
