@@ -1,6 +1,6 @@
 import torch
 
-from metrics import soft_accuracy, soft_correlation, neighborhood_enrichment, soft_f1, weighted_l1_distance, delauney_colocalization
+from metrics import soft_accuracy, soft_correlation, neighborhood_enrichment, soft_f1, delauney_colocalization, gridized_l1_distance, gridized_kl_divergence, soft_gene_distance
 class Evaluator:
     def __init__(self, config):
         self.config = config
@@ -8,20 +8,36 @@ class Evaluator:
     def evaluate(self, predicted_adata, target_adata, sample=100):
         results = {}
 
-        if "weighted_l1_distance" in self.config["metrics"]:
-            for k in [5, 10, 20]:
-                tvd=weighted_l1_distance(target_adata.obsm["aligned_spatial"],predicted_adata.obsm["spatial"],k=k, sample=sample)
-                print("weighted_l1_distance variation distance @",k,":",tvd)
-                results[f"weighted_l1_distance@{k}"]=tvd
+        ### Fatten the 3d to 2d
+        target_adata.obsm["aligned_spatial"] = target_adata.obsm["aligned_spatial"][:,:2]
+        predicted_adata.obsm["spatial"] = predicted_adata.obsm["spatial"][:,:2]
+
+
+
+        if "gridized_l1_distance" in self.config["metrics"]:
+            # for k in [5, 10, 20]:
+            for r in [0.3,0.4,0.5]:
+                tvd=gridized_l1_distance(target_adata.obsm["aligned_spatial"],predicted_adata.obsm["spatial"],radius=r)
+                print("gridized_l1_distance @",r,"r:",tvd)
+                results[f"gridized_l1_distance@{r} r"]=tvd
+
+        
+        if "gridized_kl_divergence" in self.config["metrics"]:
+            # for k in [5, 10, 20]:
+            for r in [0.3,0.4,0.5]:
+                gkld=gridized_kl_divergence(target_adata.obsm["aligned_spatial"],predicted_adata.obsm["spatial"],radius=r)
+                print("gridized_kl_divergence @",r,"r:",gkld)
+                results[f"gridized_kl_divergence@{r} r"]=gkld
 
         if "soft_accuracy" in self.config["metrics"]:
-            for k in [5, 10, 20]:
-                sa=soft_accuracy(target_adata.obs["token"].to_numpy().tolist(),target_adata.obsm["aligned_spatial"],predicted_adata.obs["token"].tolist(),predicted_adata.obsm["spatial"],k=k,sample=sample)
-                print("soft accuracy @",k,":",sa)
-                results[f"soft_accuracy@{k}"]=sa
+            # for k in [5, 10, 20]:
+            for r in [0.03, 0.04, 0.05]:
+                sa=soft_accuracy(target_adata.obs["token"].to_numpy().tolist(),target_adata.obsm["aligned_spatial"],predicted_adata.obs["token"].tolist(),predicted_adata.obsm["spatial"],radius=r,sample=sample)
+                print("soft accuracy @",r,":",sa)
+                results[f"soft_accuracy@{r}"]=sa
 
         if "delauney_colocalization" in self.config["metrics"]:
-            dc=delauney_colocalization(target_adata,target_adata.obsm["aligned_spatial"],predicted_adata,predicted_adata.obsm["spatial"],sample=sample)
+            dc=delauney_colocalization(target_adata.obs["token"].to_numpy().tolist(),target_adata.obsm["aligned_spatial"],predicted_adata.obs["token"].tolist(),predicted_adata.obsm["spatial"])
             print("delauney colocalization :",dc)
             results[f"delauney_colocalization"]=dc
             
@@ -33,18 +49,40 @@ class Evaluator:
                 results[f"neighborhood_enrichment@{k}"]=ne
 
         if "soft_correlation" in self.config["metrics"]:
-            for k in [5, 10, 20]:
-                sc=soft_correlation(target_adata,target_adata.obsm["aligned_spatial"],predicted_adata,predicted_adata.obsm["spatial"],k=k,sample=sample)
-                print("soft correlation @",k,":",sc)
-                results[f"soft_correlation@{k}"]=sc
+            # for k in [5, 10, 20]:
+            #     sc=soft_correlation(target_adata,target_adata.obsm["aligned_spatial"],predicted_adata,predicted_adata.obsm["spatial"],k=k,sample=sample)
+            #     print("soft correlation @",k,":",sc)
+            #     results[f"soft_correlation@{k}"]=sc
+
+            for r in [0.03, 0.04, 0.05, 0.1]:
+                sc=soft_correlation(target_adata,target_adata.obsm["aligned_spatial"],predicted_adata,predicted_adata.obsm["spatial"],radius=r,sample=sample)
+                print("soft correlation radius @",r,":",sc)
+                results[f"soft_correlation_radius@{r}"]=sc
 
         # F1
         if "soft_f1" in self.config["metrics"]:
-            for k in [5, 10, 20]:
+            # for k in [5, 10, 20]:
+            #     sp=soft_f1(target_adata,
+            #                       target_adata.obsm["aligned_spatial"],
+            #                       predicted_adata,
+            #                       predicted_adata.obsm["spatial"],k=k,sample=sample)[0]
+            #     print("soft f1 @",k,":",sp)
+            #     results[f"soft_f1@{k}"]=sp
+            for r in [0.03, 0.04, 0.05]:
                 sp=soft_f1(target_adata,
                                   target_adata.obsm["aligned_spatial"],
                                   predicted_adata,
-                                  predicted_adata.obsm["spatial"],k=k,sample=sample)[0]
-                print("soft f1 @",k,":",sp)
-                results[f"soft_f1@{k}"]=sp
+                                  predicted_adata.obsm["spatial"],radius=r,sample=sample)[0]
+                print("soft f1 radius @",r,":",sp)
+                results[f"soft_f1_radius@{r}"]=sp
+
+        if "soft_gene_distance" in self.config["metrics"]:
+            for r in [0.03, 0.04, 0.05]:
+                sgd=soft_gene_distance(target_adata,
+                                  target_adata.obsm["aligned_spatial"],
+                                  predicted_adata,
+                                  predicted_adata.obsm["spatial"],radius=r,sample=sample)
+                print("soft gene distance radius @",r,":",sgd)
+                results[f"soft_gene_distance_radius@{r}"]=sgd
+
         return results

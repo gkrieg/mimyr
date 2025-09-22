@@ -10,7 +10,7 @@ from generative_transformer.data_util import harmonize_dataset
 import torch
 
 class SliceDataLoader:
-    def __init__(self, mode="intra", label="subclass", metadata_dir='generative_transformer/metadata/'):
+    def __init__(self, mode="intra", label="subclass", metadata_dir='/work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata/'):
         """
         Args:
             mode (str): 'intra' or 'transfer'
@@ -60,6 +60,37 @@ class SliceDataLoader:
         else:
             slices1 = [sc.read_h5ad(os.path.join(input_dir, fname)) for fname in sorted_slices1]
         return slices1
+
+    def load_rq2_slices(self, fast_select=None):
+
+        print("Fast selecting", fast_select)
+        
+        # Load slices2
+        input_dir = "/work/magroup/skrieger/MERFISH_BICCN/processed_data/Zhuang-ABCA-2"
+        sorted_slices2 = sorted([
+            f for f in os.listdir(input_dir) if f.endswith(".h5ad")
+        ])[2:-2]
+        print(sorted_slices2)
+        if fast_select:
+            sorted_slices2 = [f for i,f in enumerate(sorted_slices2) if i in [fast_select-1,fast_select,fast_select+1]]
+            print("fs")
+        else:
+            sorted_slices2 = [f for i,f in enumerate(sorted_slices2)]
+        print(sorted_slices2)
+        slices2 = [sc.read_h5ad(os.path.join(input_dir, fname)) for fname in tqdm.tqdm(sorted_slices2)]
+        
+        # CCF coordinate filtering
+        df_ccf = pd.read_csv("/home/apdeshpa/projects/tissue-generator/data/ccf-ABCA-2.csv").set_index("cell_label")
+        for i, slice in enumerate(slices2):
+            df_filtered = df_ccf.loc[df_ccf.index.intersection(slice.obs_names)]
+            df_filtered = df_filtered.reindex(slice.obs_names)
+            slice.obs["x_ccf"] = df_filtered["x"]
+            slice.obs["y_ccf"] = df_filtered["y"]
+            slice.obs["z_ccf"] = df_filtered["z"]
+            valid_mask = ~slice.obs[["x_ccf", "y_ccf", "z_ccf"]].isna().any(axis=1)
+            slices2[i] = slice[valid_mask].copy()
+
+        return slices2
 
     def load_transfer_slices(self):
         # Load slices1
@@ -154,7 +185,7 @@ class SliceDataLoader:
             self.fine_tune_val_slices = None
             self.fine_tune_test_slices = None
 
-        elif self.mode == "rq1":
+        elif "rq1_" in self.mode:
             # Only load slices1
             slices = self.load_intra_slices()
 
@@ -170,7 +201,9 @@ class SliceDataLoader:
 
             # Manual split
             # Manual split
-            test_indices = [43, 34, 8, 16, 29]
+            test_indices = [8, 16, 29, 34, 43]
+            test_indices = [test_indices[int(self.mode[-1])]]  # pick one index based on mode
+
             val_indices = [6, 28, 44, 14]
 
             test_slices = [slices_tokenized[i] for i in test_indices]
@@ -246,7 +279,7 @@ class SliceDataLoader:
             slices_tokenized = self.gene_exp_model.get_tokenized_slices()
 
             # Manual split
-            test_indices = [43, 34, 8, 16, 29]
+            test_indices = [8, 16, 29, 34, 43]
             val_indices = [6, 28, 44, 14]
 
             test_slices = [slices_tokenized[i] for i in test_indices]
@@ -257,9 +290,6 @@ class SliceDataLoader:
                             if i not in test_indices and i not in val_indices]
             train_slices = [slices_tokenized[i] for i in train_indices]
 
-            self.train_slices = train_slices
-            self.val_slices = val_slices
-            self.test_slices = test_slices
 
             # references: you previously picked [27, 29], keep or adjust as needed
             # References = neighbors (-1, +1) of test slices, if valid
@@ -274,6 +304,33 @@ class SliceDataLoader:
             ref_indices = sorted(set(ref_indices))
             self.reference_slices = [slices_tokenized[i] for i in ref_indices]
 
+            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse.pt')
+            edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
+            new_train_slices = []
+            for s in train_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_train_slices.append(s)
+            train_slices = new_train_slices
+            new_reference_slices = []
+            for s in self.reference_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_reference_slices.append(s)
+            reference_slices = new_reference_slices
+            new_val_slices = []
+            for s in val_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_val_slices.append(s)
+            val_slices = new_val_slices
+            new_test_slices = []
+            for s in test_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_test_slices.append(s)
+            test_slices = new_test_slices
+
+            self.train_slices = train_slices
+            self.val_slices = val_slices
+            self.test_slices = test_slices
+            self.reference_slices = reference_slices
 
             # No fine-tuning slices in intra mode
             self.fine_tune_train_slices = None
@@ -281,9 +338,111 @@ class SliceDataLoader:
             self.fine_tune_test_slices = None
 
 
+
+        elif self.mode == "rq2":
+            # Only load slices1
+            slices = self.load_rq2_slices(fast_select=33)
+
+            # Alignment
+            self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
+            self.density_model.fit()
+            aligned_slices = self.density_model.get_common_coordinate_locations()
+
+            # Tokenization
+            self.gene_exp_model = GeneExpModel(aligned_slices, label=self.label)
+            self.gene_exp_model.fit()
+            slices_tokenized = self.gene_exp_model.get_tokenized_slices()
+
+
+            hole_seeds = [3885, 4632, 9765, 10192, 27389]
+
+            test_slices = []
+            masks = []
+            self.hole_centers = []
+            for hs in hole_seeds:
+                print(hs)
+                new_slice = slices_tokenized[1].copy()
+                mask = np.linalg.norm(new_slice.obsm["aligned_spatial"]-new_slice.obsm["aligned_spatial"][hs],axis=1)<0.3
+                new_slice = new_slice[mask]
+                masks.append(mask)
+                test_slices.append(new_slice)
+                self.hole_centers.append(new_slice.obsm["aligned_spatial"].mean(0))
+
+            #logical or all masks
+            logical_or_mask = np.logical_or.reduce(masks)
+
+            remaining_cells_slice = slices_tokenized[1][~logical_or_mask]
+
+            #random 90 10 train val split
+            train_mask = np.random.rand(len(remaining_cells_slice)) < 0.9
+            train_slices = [remaining_cells_slice[train_mask]]
+            val_slices = [remaining_cells_slice[~train_mask]]
+
+            self.reference_slices = [remaining_cells_slice for t in test_slices] + [remaining_cells_slice for t in test_slices]
+
+            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse.pt')
+            edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
+            new_train_slices = []
+            for s in train_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_train_slices.append(s)
+            train_slices = new_train_slices
+            new_reference_slices = []
+            for s in self.reference_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_reference_slices.append(s)
+            reference_slices = new_reference_slices
+            new_val_slices = []
+            for s in val_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_val_slices.append(s)
+            val_slices = new_val_slices
+            new_test_slices = []
+            for s in test_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_test_slices.append(s)
+            test_slices = new_test_slices
+
+            self.train_slices = train_slices
+            self.val_slices = val_slices
+            self.test_slices = test_slices
+            self.reference_slices = reference_slices
+
+            # No fine-tuning slices in intra mode
+            self.fine_tune_train_slices = None
+            self.fine_tune_val_slices = None
+            self.fine_tune_test_slices = None
+        
+        # elif "rq2" in self.mode:
+        #     # Only load slices1
+        #     slices = self.load_rq2_slices()
+        #     # Alignment
+        #     self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
+        #     self.density_model.fit()
+        #     aligned_slices = self.density_model.get_common_coordinate_locations()
+        #     # Tokenization
+        #     self.gene_exp_model = GeneExpModel(aligned_slices, label=self.label)
+        #     self.gene_exp_model.fit()
+        #     slices_tokenized = self.gene_exp_model.get_tokenized_slices()
+        #     # Manual split
+        #     test_indices = [8, 16, 29, 34, 43]
+        #     test_indices = [test_indices[int(self.mode[-1])]]  # pick one index based on mode
+        #     val_indices = [6, 28, 44, 14]
+        #     test_slices = [slices_tokenized[i] for i in test_indices]
+        #     val_slices = [slices_tokenized[i] for i in val_indices]
+
+        #     train_indices = [i for i in range(len(slices_tokenized)) if i not in test_indices and i not in val_indices]
+        #     train_slices = [slices_tokenized[i] for i in train_indices]
+
+        #     self.train_slices = train_slices
+        #     self.val_slices = val_slices
+        #     self.test_slices = test_slices
+        #     self.reference_slices = [slices_tokenized[i] for i in ref_indices]
+
+
         elif "single_slice" in self.mode:
             # Only load slices1
-            slices = self.load_intra_slices(fast_select=int(self.mode[-2:]))
+            slices = self.load_rq2_slices(fast_select=int(self.mode[-2:]))
 
             # Alignment
             self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
@@ -580,7 +739,31 @@ class SliceDataLoader:
             val_slice = slices_tokenized[0]
             test_slice = slices_tokenized[1]
             train_slices = [slices_tokenized[2],slices_tokenized[3]]
-            
+            self.reference_slices = [slices_tokenized[2],slices_tokenized[3]]
+
+            # meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse.pt')
+            # edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
+            # new_train_slices = []
+            # for s in train_slices:
+            #     s = harmonize_dataset(s, meta_info, edges)
+            #     new_train_slices.append(s)
+            # train_slices = new_train_slices
+            # new_reference_slices = []
+            # for s in self.reference_slices:
+            #     s = harmonize_dataset(s, meta_info, edges)
+            #     new_reference_slices.append(s)
+            # reference_slices = new_reference_slices
+            # new_val_slices = []
+            # for s in val_slices:
+            #     s = harmonize_dataset(s, meta_info, edges)
+            #     new_val_slices.append(s)
+            # val_slices = new_val_slices
+            # new_test_slices = []
+            # for s in test_slices:
+            #     s = harmonize_dataset(s, meta_info, edges)
+            #     new_test_slices.append(s)
+            # test_slices = new_test_slices 
+
             self.train_slices = train_slices
             self.val_slices = [val_slice]
             self.test_slices = [test_slice]
@@ -589,6 +772,65 @@ class SliceDataLoader:
             self.fine_tune_train_slices = None
             self.fine_tune_val_slices = None
             self.fine_tune_test_slices = None
+
+
+        elif self.mode == "superdebug":
+            # Only load slices1
+            slices = self.load_intra_slices(fast=True)
+
+            # Alignment
+            self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
+            self.density_model.fit()
+            aligned_slices = self.density_model.get_common_coordinate_locations()
+
+            # Tokenization
+            self.gene_exp_model = GeneExpModel(aligned_slices, label=self.label)
+            self.gene_exp_model.fit()
+            slices_tokenized = self.gene_exp_model.get_tokenized_slices()
+
+            # Manual split
+            val_slice = slices_tokenized[0]
+            test_slice = slices_tokenized[1]
+            train_slices = [slices_tokenized[2],slices_tokenized[3]]
+            self.reference_slices = [slices_tokenized[2],slices_tokenized[3]]
+
+            # meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse.pt')
+            # edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
+            # new_train_slices = []
+            # for s in train_slices:
+            #     s = harmonize_dataset(s, meta_info, edges)
+            #     new_train_slices.append(s)
+            # train_slices = new_train_slices
+            # new_reference_slices = []
+            # for s in self.reference_slices:
+            #     s = harmonize_dataset(s, meta_info, edges)
+            #     new_reference_slices.append(s)
+            # reference_slices = new_reference_slices
+            # new_val_slices = []
+            # for s in val_slices:
+            #     s = harmonize_dataset(s, meta_info, edges)
+            #     new_val_slices.append(s)
+            # val_slices = new_val_slices
+            # new_test_slices = []
+            # for s in test_slices:
+            #     s = harmonize_dataset(s, meta_info, edges)
+            #     new_test_slices.append(s)
+            # test_slices = new_test_slices 
+
+            self.train_slices = train_slices
+            self.val_slices = [val_slice]
+
+            #subsample 1000 random cells from test slice
+            test_slice = test_slice[np.random.choice(test_slice.n_obs, 1000, replace=False)]            
+            self.test_slices = [test_slice]
+
+
+            # No fine-tuning slices in intra mode
+            self.fine_tune_train_slices = None
+            self.fine_tune_val_slices = None
+            self.fine_tune_test_slices = None
+
+
 
 
         elif self.mode == "transfer":

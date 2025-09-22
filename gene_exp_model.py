@@ -10,6 +10,9 @@ import math
 from sklearn.neighbors import KernelDensity
 from scipy.special import gamma
 import scanpy as sc
+import sys
+sys.path.append("generative_transformer")
+
 from scMulan import generate_prompt_for_cg
 
 from utils.hf_tokenizer import scMulanTokenizer

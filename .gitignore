@@ -9,3 +9,5 @@ experimentation
 wandb
 model_checkpoints
 *.pt
+*.pkl
+*.png
