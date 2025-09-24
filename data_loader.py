@@ -446,8 +446,6 @@ class SliceDataLoader:
             # References = neighbors (-1, +1) of test slices, if valid
             ref_indices = [15, 21, 21, 29, 29, 37,  37, 42, 42, 42]
 
-            # remove duplicates, just in case
-            ref_indices = sorted(set(ref_indices))
             self.reference_slices = [slices_tokenized[i] for i in ref_indices]
 
             meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse.pt')
