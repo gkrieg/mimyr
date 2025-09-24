@@ -11,3 +11,5 @@ model_checkpoints
 *.pt
 *.pkl
 *.png
+artifacts
+plot_creator.ipynb
