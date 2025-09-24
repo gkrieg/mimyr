@@ -61,12 +61,12 @@ class SliceDataLoader:
             slices1 = [sc.read_h5ad(os.path.join(input_dir, fname)) for fname in sorted_slices1]
         return slices1
 
-    def load_rq2_slices(self, fast_select=None):
+    def load_zhuangn_slices(self, n=2,fast_select=None):
 
         print("Fast selecting", fast_select)
         
         # Load slices2
-        input_dir = "/work/magroup/skrieger/MERFISH_BICCN/processed_data/Zhuang-ABCA-2"
+        input_dir = f"/work/magroup/skrieger/MERFISH_BICCN/processed_data/Zhuang-ABCA-{n}"
         sorted_slices2 = sorted([
             f for f in os.listdir(input_dir) if f.endswith(".h5ad")
         ])[2:-2]
@@ -80,7 +80,7 @@ class SliceDataLoader:
         slices2 = [sc.read_h5ad(os.path.join(input_dir, fname)) for fname in tqdm.tqdm(sorted_slices2)]
         
         # CCF coordinate filtering
-        df_ccf = pd.read_csv("/home/apdeshpa/projects/tissue-generator/data/ccf-ABCA-2.csv").set_index("cell_label")
+        df_ccf = pd.read_csv(f"/home/apdeshpa/projects/tissue-generator/data/ccf-ABCA-{n}.csv").set_index("cell_label")
         for i, slice in enumerate(slices2):
             df_filtered = df_ccf.loc[df_ccf.index.intersection(slice.obs_names)]
             df_filtered = df_filtered.reindex(slice.obs_names)
@@ -341,7 +341,7 @@ class SliceDataLoader:
 
         elif self.mode == "rq2":
             # Only load slices1
-            slices = self.load_rq2_slices(fast_select=33)
+            slices = self.load_zhuangn_slices(fast_select=33, n=2)
 
             # Alignment
             self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
@@ -412,7 +412,77 @@ class SliceDataLoader:
             self.fine_tune_train_slices = None
             self.fine_tune_val_slices = None
             self.fine_tune_test_slices = None
-        
+
+
+
+        elif self.mode == "rq3":
+            # Only load slices1
+            slices = self.load_intra_slices()
+
+            # Alignment
+            self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
+            self.density_model.fit()
+            aligned_slices = self.density_model.get_common_coordinate_locations()
+
+            # Tokenization
+            self.gene_exp_model = GeneExpModel(aligned_slices, label=self.label)
+            self.gene_exp_model.fit()
+            slices_tokenized = self.gene_exp_model.get_tokenized_slices()
+
+            # Manual split
+            # [15, 18,  21,  24, 29, 32, 37,  40, 42,  44]
+            test_indices = [18, 24, 32, 40, 44]
+            val_indices = [29]
+
+            test_slices = [slices_tokenized[i] for i in test_indices]
+            val_slices = [slices_tokenized[i] for i in val_indices]
+
+            # Train = everything except test + val
+            train_indices = [15, 21, 37, 42]
+            train_slices = [slices_tokenized[i] for i in train_indices]
+
+
+            # references: you previously picked [27, 29], keep or adjust as needed
+            # References = neighbors (-1, +1) of test slices, if valid
+            ref_indices = [15, 21, 21, 29, 29, 37,  37, 42, 42, 42]
+
+            # remove duplicates, just in case
+            ref_indices = sorted(set(ref_indices))
+            self.reference_slices = [slices_tokenized[i] for i in ref_indices]
+
+            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse.pt')
+            edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
+            new_train_slices = []
+            for s in train_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_train_slices.append(s)
+            train_slices = new_train_slices
+            new_reference_slices = []
+            for s in self.reference_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_reference_slices.append(s)
+            reference_slices = new_reference_slices
+            new_val_slices = []
+            for s in val_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_val_slices.append(s)
+            val_slices = new_val_slices
+            new_test_slices = []
+            for s in test_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_test_slices.append(s)
+            test_slices = new_test_slices
+
+            self.train_slices = train_slices
+            self.val_slices = val_slices
+            self.test_slices = test_slices
+            self.reference_slices = reference_slices
+
+            # No fine-tuning slices in intra mode
+            self.fine_tune_train_slices = None
+            self.fine_tune_val_slices = None
+            self.fine_tune_test_slices = None
+
         # elif "rq2" in self.mode:
         #     # Only load slices1
         #     slices = self.load_rq2_slices()
@@ -442,7 +512,7 @@ class SliceDataLoader:
 
         elif "single_slice" in self.mode:
             # Only load slices1
-            slices = self.load_rq2_slices(fast_select=int(self.mode[-2:]))
+            slices = self.load_zhuangn_slices(n=2, fast_select=int(self.mode[-2:]))
 
             # Alignment
             self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)

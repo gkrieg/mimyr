@@ -18,6 +18,7 @@ import copy, os, pandas as pd
 import pickle as pkl
 
 import json
+import gc
 
 
 np.random.seed(42)
@@ -56,7 +57,7 @@ def get_args():
     parser = argparse.ArgumentParser(description="Run inference with config options.")
 
     # data / model paths
-    parser.add_argument("--data_mode", type=str, default="rq2",
+    parser.add_argument("--data_mode", type=str, default="rq3",
                         help="Mode for SliceDataLoader")
     parser.add_argument("--data_label", type=str, default="cluster",
                         help="Label type for SliceDataLoader")
@@ -78,7 +79,7 @@ def get_args():
     parser.add_argument("--cluster_inference_type", type=str,
                         default="model",
                         help="How to infer subclass")
-    parser.add_argument("--expression_inference_type", type=str, default="lookup",
+    parser.add_argument("--expression_inference_type", type=str, default="end",
                         help="How to infer gene expression")
 
 
@@ -96,12 +97,12 @@ def get_args():
         "--metrics",
         type=lambda s: s.split(","),
         help="Comma-separated list of metrics to compute (soft_accuracy,soft_correlation,neighborhood_enrichment,soft_precision)",
-        default=["soft_f1","soft_correlation"]#,"soft_accuracy", "soft_correlation", "neighborhood_enrichment", "soft_precision"],
+        default=["soft_accuracy"]#"soft_f1","soft_correlation"]#,"soft_accuracy", "soft_correlation", "neighborhood_enrichment", "soft_precision"],
     )
-    parser.add_argument("--metric_sampling", type=int, default=100, 
+    parser.add_argument("--metric_sampling", type=int, default=1, 
                         help="Percentage of samples to use for metric computation")
     parser.add_argument("--out_csv", type=str,
-                        default="results/rq2.csv",
+                        default="results/rq3_cluster_ablation.csv",
                         help="Output CSV file path")
 
 
@@ -209,6 +210,7 @@ def main():
         inf = Inferernce((trainer, location_model), celltype_model, slice_data_loader, copy.deepcopy(cfg))
         pred = inf.run_inference(slice_data_loader.test_slices)
         res = Evaluator(cfg).evaluate(pred, slice_data_loader.test_slices[0], sample=args.metric_sampling)
+        res = {k: float(v) for k, v in res.items()}
 
         row = {**cfg, **res}
         write_row(row, args.out_csv)
@@ -230,7 +232,11 @@ def main():
             pkl.dump(pred, f)        
 
 
-        
+        # delete all local variables and collect garbage
+        del pred, trainer, location_model, celltype_model, inf
+        torch.cuda.empty_cache()
+        gc.collect()
+
 
 
 if __name__ == "__main__":
