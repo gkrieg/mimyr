@@ -7,7 +7,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import tqdm
-
+import os
 # ### --------------------- CORE FUNCTIONS ---------------------
 # def generate_anndata_from_samples(region_model, xyz, device="cuda", sample_from_probs=False,
 #                                   use_conditionals=False, xyz_labels=None, num_classes=None,
@@ -489,8 +489,12 @@ def plot_spatial_with_palette(
             size=size,
             scale_factor=scale_factor,
             legend_loc="right margin" if show_legend else None,
-            save=save
+            save=None
         )
+        if save is not None:
+            os.makedirs(os.path.dirname(save), exist_ok=True)
+            plt.savefig(save, bbox_inches="tight", dpi=300)
+        plt.close()
 
 
 ### --------------------- EVALUATION FUNCTIONS ---------------------

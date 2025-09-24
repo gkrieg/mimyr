@@ -325,3 +325,60 @@ class CelltypeModel(nn.Module):
         torch.save(self.model.state_dict(), path)
         print(f"💾 Saved model weights to {path}")
 
+
+
+
+
+
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+
+from metrics import soft_accuracy  # optional, only if you keep it
+
+class SkeletonCelltypeModel(nn.Module):
+    def __init__(self, n_classes, num_features=3, learning_rate=0.001, device=None):
+        super(SkeletonCelltypeModel, self).__init__()
+
+        self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Core classifier
+        self.model = Model(
+            num_features=num_features,
+            num_classes=n_classes,
+            distance_transform_off=False,
+            memory_off=True,
+            rff_off=True,
+            attention_off=True
+        ).to(self.device)
+
+        self.loss_fn = nn.CrossEntropyLoss()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
+
+    def forward(self, x):
+        return self.model(x)
+
+    def get_token_distr(self, x):
+        """Return probability distribution over classes for a single input tensor [F]."""
+        self.model.eval()
+        with torch.no_grad():
+            x = x.to(self.device).unsqueeze(0)  # [1, F]
+            logits = self.model(x)
+            probs = torch.softmax(logits, dim=1)
+        return probs.cpu().numpy()
+
+    def sample_output(self, x):
+        """Sample one class index from the predicted distribution."""
+        probs = self.get_token_distr(x).flatten()
+        return np.random.choice(len(probs), p=probs)
+
+    def load_model(self, path):
+        self.model.load_state_dict(torch.load(path, map_location=self.device))
+        self.model.to(self.device)
+        print(f"📦 Loaded model weights from {path}")
+
+    def save_model(self, path):
+        torch.save(self.model.state_dict(), path)
+        print(f"💾 Saved model weights to {path}")

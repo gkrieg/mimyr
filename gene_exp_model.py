@@ -22,7 +22,7 @@ import scMulan
 import torch
 from model.model import MulanConfig, scMulanModel
 from scMulan import scMulan
-
+import pickle as pkl
 
 class GeneExpModel(nn.Module):
     def __init__(self, slices, label="subclass"):
@@ -118,10 +118,20 @@ class GeneExpModel(nn.Module):
         concatenated_slices=ad.concat(self.slices)
         unique_subclasses = concatenated_slices.obs[self.label].unique()
         self.num_tokens=len(unique_subclasses)
-        subclass_to_id = {subclass: i for i, subclass in enumerate(unique_subclasses)}
-        self.id_to_subclass = {i:subclass for i, subclass in enumerate(unique_subclasses)}
+        try:
+            self.id_to_subclass = pkl.load(open("id_to_subclass.pkl","rb"))
+            subclass_to_id = {v:k for k,v in self.id_to_subclass.items()}
+        except:
+            subclass_to_id = {subclass: i for i, subclass in enumerate(unique_subclasses)}
+            self.id_to_subclass = {i:subclass for i, subclass in enumerate(unique_subclasses)}
+            print("Recreating token map")
         self.subclass_to_id=subclass_to_id
         concatenated_slices.obs["token"] = concatenated_slices.obs[self.label].map(subclass_to_id)
+
+        self.concatenated_slices=concatenated_slices
+
+        return
+        ### takes a long time, so removing unless averaging is being used
 
         gene_exp_dict={i:concatenated_slices[concatenated_slices.obs["token"]==i].X.mean(0) for i in range(len(unique_subclasses))}  
         print(gene_exp_dict[0].shape)

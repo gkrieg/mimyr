@@ -35,7 +35,6 @@ from anndata import AnnData
 from scipy.sparse import csr_matrix
 import pandas as pd
 from reference.GeneSymbolUniform.pyGSUni import GeneSymbolUniform
-
 import numpy as np
 from scipy.spatial import cKDTree
 import pandas as pd
@@ -44,12 +43,21 @@ import tqdm
 import pickle as pkl
 
 from sklearn.neighbors import NearestNeighbors
+import copy
+
+from analysis import assign_shared_colors, plot_spatial_with_palette
+
+# === PCA visualization ===
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.decomposition import PCA
 
 
 class Inferernce:
     def __init__(self, location_model, subclass_model, slice_data_loader, config):
-        self.slice_data_loader, self.data_for_model_init = slice_data_loader
-        self.token_mapping_model = slice_data_loader[0].gene_exp_model
+        self.slice_data_loader = slice_data_loader
+        self.slice_data_loader2 = copy.deepcopy(slice_data_loader)
+        self.slice_data_loader2.gene_exp_model.id_to_subclass = pkl.load(open("id_to_subclass.pkl","rb"))
+        self.token_mapping_model = slice_data_loader.gene_exp_model
         self.location_model = location_model
         self.subclass_model = subclass_model
         self.config = config
@@ -121,6 +129,23 @@ class Inferernce:
             xyz = self.slice_data_loader.reference_slices[closest_ref_slice].obsm["aligned_spatial"].copy()
             xyz[:, -1] = new_tissue.obsm["aligned_spatial"].mean(0)[-1]
 
+        elif loc_type == "uniform_circle":
+
+            def sample_circle(radius=0.3, n=1):
+                theta = np.random.uniform(0, 2*np.pi, n)
+                r = radius * np.sqrt(np.random.uniform(0, 1, n))
+                x = r * np.cos(theta)
+                y = r * np.sin(theta)
+                return np.column_stack((x, y))
+
+            # Example: 5 samples
+            xyz = sample_circle(0.3, adata.n_obs)
+            # make the third column the same as the mean z of the new tissue
+            xyz = np.column_stack((xyz, np.full(adata.n_obs, new_tissue.obsm["aligned_spatial"].mean(0)[-1])))            
+            xyz+=self.slice_data_loader.hole_centers[0]
+            
+
+
         n = adata.n_obs
         if xyz.shape[0] > n:
             idx = np.random.choice(xyz.shape[0], size=n, replace=False)
@@ -162,13 +187,15 @@ class Inferernce:
                 sample_from_probs=True,
                 use_conditionals=False,
                 xyz_labels=None,
-                num_classes=max(self.subclass_model.y) + 1,
+                num_classes= 5274, #max(self.subclass_model.y) + 1,
                 gibbs=False,
                 n_iter=1,
                 use_budget=False,
                 graph_smooth=False,
             )
             adata.obs["token"] = adata_sampled.obs["token"].to_numpy()
+            # Percentage of cells not in training data 
+
 
         
         if "homogenize" in clust_type:
@@ -279,7 +306,7 @@ class Inferernce:
             # Get higher hierarchy levels
 
             ##IMP TO USE THIS ONE HERE
-            pred_data.obs['readable_label'] = self.data_for_model_init.token_mapping_model.get_label_from_token(pred_data.obs['token'].values)
+            pred_data.obs['readable_label'] = self.slice_data_loader2.gene_exp_model.get_label_from_token(pred_data.obs['token'].values)
             hierarchy = pkl.load(open(f'{self.slice_data_loader.metadata_dir}hierarchy.pkl','rb'))
             for h in ['class', 'subclass','supertype','cluster']:
                 pred_data.obs[h] = 'na'
@@ -309,7 +336,7 @@ class Inferernce:
 
             # 4) re-create
             adata_sub = AnnData(X=X_sparse, obs=obs, var=var, obsm=pred_data.obsm.copy())
-            ckp_path = '/compute/oven-0-13/skrieger/mouse-mediummodelscrna/epoch110_model.pt'
+            ckp_path = self.config["expression_model_checkpoint"]#'/compute/oven-0-13/skrieger/mouse-mediummodelscrna/epoch110_model.pt'
             scml = model_generate(ckp_path=ckp_path,
                                 adata=adata_sub,
                                 meta_info=meta_info,
@@ -354,6 +381,27 @@ class Inferernce:
         else:
             pred_data = self.infer_location(pred_data, real_data)
 
+        plt.figure()
+
+        plt.scatter(pred_data.obsm["spatial"][:,0], pred_data.obsm["spatial"][:,1], s=0.1, alpha=0.5)
+        plt.xlim(0,12)
+        plt.ylim(0,8)
+        plt.title("Inferred Locations model")
+        plt.savefig(f"{self.config['artifact_dir']}/inferred_locations_model.png", dpi=300)
+
+        plt.figure()
+
+        # Ground truth
+        plt.scatter(real_data.obsm["aligned_spatial"][:,0], real_data.obsm["aligned_spatial"][:,1], s=0.1, alpha=0.5)
+        plt.xlim(0,12)
+        plt.ylim(0,8)
+        plt.title("Ground Truth Locations")
+        plt.savefig(f"{self.config['artifact_dir']}/ground_truth_locations.png", dpi=300)
+
+        plt.figure()
+
+
+
         # step 2: cluster
         if "end" in self.config["cluster_inference_type"]:
             return pred_data
@@ -362,11 +410,76 @@ class Inferernce:
         else:
             pred_data = self.infer_cluster(pred_data, real_data)
 
+        
+        # step 3: expression
+        real_data.obsm["spatial"] = real_data.obsm["aligned_spatial"]
+        assign_shared_colors([real_data,pred_data], color_key="token")
+        plot_spatial_with_palette(real_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"/home/apdeshpa/projects/tissue-generator/{self.config['artifact_dir']}/real_data_clusters.png")
+        plot_spatial_with_palette(pred_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"/home/apdeshpa/projects/tissue-generator/{self.config['artifact_dir']}/pred_data_clusters.png")
+
+
+
         if "end" in self.config["expression_inference_type"]:
             return pred_data
         elif "skip" in self.config["expression_inference_type"]:
             pred_data.X = real_data.X.copy()
         else:
             pred_data = self.infer_expression(pred_data, real_data)
+
+        # do pca of X and create RGD colors for each cell and the plot pred and GT
+
+
+        
+        def joint_pca_rgb(real_data, pred_data, n_components=3):
+            common_genes_atleast1 = ['Prkcq', 'Syt6', 'Ptprm', 'Hspg2', 'Cxcl14', 'Dock5', 'Stxbp6', 'Nfib', 'Gfap', 'Gja1', 'Tcf7l2', 'Rorb', 'Aqp4', 'Slc7a10', 'Grm3', 'Slc1a3', 'Serpine2', 'Lgr6', 'Slc32a1', 'Adamts19', 'Cdh20', 'Sox2', 'Lpar1', 'Pcp4l1', 'Spock3', 'Lypd1', 'Zeb2', 'Unc13c', 'Rgs6', 'Sox6', 'Tafa2', 'Lrp4', 'St6galnac5', 'C030029H02Rik', 'Ust', '2900052N01Rik', 'Sp8', 'Igf2', 'Fli1', 'Opalin', 'Sox10', 'Acta2', 'Chrm2', 'Gad2', 'Cgnl1', 'Vcan', 'Cldn5', 'Mog', 'Maf', 'Bmp4', 'Ctss', 'Dach1', 'Grm8', 'Zfp536', 'Zic1', 'Bcl11b', 'Prkd1', 'C1ql1', 'Hs3st4', 'Pdgfd', 'Nxph1', 'Ebf1', 'Klk6', 'Man1a', 'Sema3c', 'Nr2f2', 'Tgfbr2', 'Pde3a', 'Zfpm2', 'C1ql3', 'Marcksl1', 'Gli2', 'Sema5a', 'Wls', 'Hmcn1', 'Abcc9', 'Kcnip1', 'Mecom', 'Tshz2', 'Nfix', 'Gli3', 'Meis1', 'Kcnmb2', 'Egfem1', 'Adamtsl1', 'Tbx3', 'Gfra1', 'Fign', 'Glis3', 'Kcnj8', 'Adgrf5', 'Vip', 'Chn2', 'Tafa1', 'Ntng1', 'Grik1', 'St18', 'Rmst', 'Dscaml1', 'Synpr', 'Adra1a', 'Prom1', 'Cpa6']
+            common_genes = pd.Index(common_genes_atleast1, name="gene")
+            X_real = real_data[:,common_genes].X.toarray() if hasattr(real_data.X, "toarray") else real_data[:,common_genes].X
+            X_pred = pred_data[:,common_genes].X.toarray() if hasattr(pred_data.X, "toarray") else pred_data[:,common_genes].X
+
+            
+
+            X_concat = np.vstack([X_real, X_pred])
+            pca = PCA(n_components=n_components)
+            comps = pca.fit_transform(X_concat)
+
+            scaler = MinMaxScaler()
+            comps_scaled = scaler.fit_transform(comps)
+
+            rgb_real = comps_scaled[:len(real_data), :3]
+            rgb_pred = comps_scaled[len(real_data):, :3]
+
+            return rgb_real, rgb_pred
+
+        # apply
+        rgb_real, rgb_pred = joint_pca_rgb(real_data, pred_data)
+        rgb_real = np.clip(rgb_real, 0, 1)
+        rgb_pred = np.clip(rgb_pred, 0, 1)
+
+        real_data.obs["rgb"] = [tuple(c) for c in rgb_real]
+        pred_data.obs["rgb"] = [tuple(c) for c in rgb_pred]
+
+
+
+
+
+        # plot real
+        plt.figure(figsize=(10,10))
+        plt.scatter(real_data.obsm["aligned_spatial"][:,0],
+                    real_data.obsm["aligned_spatial"][:,1],
+                    c=rgb_real, s=400)
+        plt.title("Real Data PCA Colors")
+        plt.axis("equal")
+        plt.savefig(f"{self.config['artifact_dir']}/real_data_pca.png", dpi=300)
+
+        # plot pred
+        plt.figure(figsize=(10,10))
+        plt.scatter(pred_data.obsm["spatial"][:,0],
+                    pred_data.obsm["spatial"][:,1],
+                    c=rgb_pred, s=400)
+        plt.title("Pred Data PCA Colors")
+        plt.axis("equal")
+        plt.savefig(f"{self.config['artifact_dir']}/pred_data_pca.png", dpi=300)
+
+
 
         return pred_data

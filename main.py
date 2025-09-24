@@ -1,12 +1,13 @@
 import argparse
 from dataclasses import dataclass
+from datetime import datetime
 from email import parser
 import sys
 import anndata as ad
 from diffusion_model import DDPMTrainer
 sys.path.append("generative_transformer")
 
-from celltype_model import CelltypeModel
+from celltype_model import CelltypeModel, SkeletonCelltypeModel
 from data_loader import SliceDataLoader
 from biological_model import BiologicalModel2
 import torch
@@ -14,6 +15,10 @@ import numpy as np
 from inference import Inferernce
 from evaluator import Evaluator
 import copy, os, pandas as pd
+import pickle as pkl
+
+import json
+
 
 np.random.seed(42)
 torch.manual_seed(42)
@@ -62,10 +67,10 @@ def get_args():
                         default="experimentation/best_model_cluster1.pt",
                         help="Path to trained CelltypeModel checkpoint")    
     parser.add_argument("--expression_model_checkpoint", type=str,  ### CHANGE
-                            default="experimentation/best_model_cluster1.pt",
+                            default="/compute/oven-0-13/skrieger/mouse-mediummodelscrna2/epoch140_model.pt",
                             help="Path to trained expression checkpoint")
 
-    parser.add_argument("--location_inference_type", type=str, default="model",
+    parser.add_argument("--location_inference_type", type=str, default="skip",
                         help="Type of location inference")
     parser.add_argument("--kde_bandwidth", type=float, default=0.01,
                         help="Bandwidth for KDE")
@@ -73,7 +78,7 @@ def get_args():
     parser.add_argument("--cluster_inference_type", type=str,
                         default="model",
                         help="How to infer subclass")
-    parser.add_argument("--expression_inference_type", type=str, default="model",
+    parser.add_argument("--expression_inference_type", type=str, default="lookup",
                         help="How to infer gene expression")
 
 
@@ -93,9 +98,10 @@ def get_args():
         help="Comma-separated list of metrics to compute (soft_accuracy,soft_correlation,neighborhood_enrichment,soft_precision)",
         default=["soft_f1","soft_correlation"]#,"soft_accuracy", "soft_correlation", "neighborhood_enrichment", "soft_precision"],
     )
-
+    parser.add_argument("--metric_sampling", type=int, default=100, 
+                        help="Percentage of samples to use for metric computation")
     parser.add_argument("--out_csv", type=str,
-                        default="results/debug2.csv",
+                        default="results/rq2.csv",
                         help="Output CSV file path")
 
 
@@ -116,24 +122,38 @@ def already_done(cfg, path):
 
 def main():
     args = get_args()
-
     cfg = args.__dict__
 
-    data_for_model_init = SliceDataLoader(mode="rq1", label=args.data_label)
-    data_for_model_init.prepare()
+    # data_for_model_init = SliceDataLoader(mode="rq1", label=args.data_label)
+    # data_for_model_init.prepare()
 
     slice_data_loader = SliceDataLoader(mode=args.data_mode, label=args.data_label)
     slice_data_loader.prepare()
 
+    
+    # data_for_model_init=slice_data_loader  # use same references for both models
+
     temp_test_slices = slice_data_loader.test_slices.copy()
     temp_ref_slices = slice_data_loader.reference_slices.copy()
-    temp_hole_centers = slice_data_loader.hole_centers.copy()
+    try:
+        temp_hole_centers = slice_data_loader.hole_centers.copy()
+    except:
+        pass
 
 
     for i,slice in enumerate(temp_test_slices):
         # slice = slice[np.random.choice(slice.n_obs, 1000, replace=False)]            
+        #create a new folder in artificats with the timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        artifact_dir = f"artifacts/{timestamp}"
+        cfg["artifact_dir"] = artifact_dir
+        os.makedirs(artifact_dir, exist_ok=True)
+
         slice_data_loader.test_slices = [slice]
-        slice_data_loader.hole_centers = [temp_hole_centers[i]]
+        try:
+            slice_data_loader.hole_centers = [temp_hole_centers[i]]
+        except:
+            pass
 
         slice_data_loader.reference_slices = temp_ref_slices[2*i:2*i+2]  # adjust based on which references you want to use
         cfg["slice_index"] = i
@@ -168,15 +188,17 @@ def main():
         location_model = BiologicalModel2([best_ref_slice],bandwidth=args.kde_bandwidth)
         location_model.fit()
 
-        celltype_model = CelltypeModel(
-            data_for_model_init.train_slices,
-            data_for_model_init.gene_exp_model.num_tokens,
-            val_slice=data_for_model_init.val_slices[0],
-            epochs=args.epochs,
-            learning_rate=args.learning_rate,
-            batch_size=args.batch_size,
-            device=args.device
-        )
+        # celltype_model = CelltypeModel(
+        #     data_for_model_init.train_slices,
+        #     data_for_model_init.gene_exp_model.num_tokens,
+        #     val_slice=data_for_model_init.val_slices[0],
+        #     epochs=args.epochs,
+        #     learning_rate=args.learning_rate,
+        #     batch_size=args.batch_size,
+        #     device=args.device
+        # )
+
+        celltype_model = SkeletonCelltypeModel(5274, num_features=3)
 
         celltype_model.load_model(args.cluster_model_checkpoint)
 
@@ -184,13 +206,31 @@ def main():
             print("skip", cfg)
             return
 
-        inf = Inferernce((trainer, location_model), celltype_model, (slice_data_loader,data_for_model_init), copy.deepcopy(cfg))
+        inf = Inferernce((trainer, location_model), celltype_model, slice_data_loader, copy.deepcopy(cfg))
         pred = inf.run_inference(slice_data_loader.test_slices)
-        res = Evaluator(cfg).evaluate(pred, slice_data_loader.test_slices[0], sample=1)
+        res = Evaluator(cfg).evaluate(pred, slice_data_loader.test_slices[0], sample=args.metric_sampling)
 
         row = {**cfg, **res}
         write_row(row, args.out_csv)
         print("wrote", cfg)
+        #save config to artifact dir as json
+
+        # save config + results into artifact dir
+        cfg_path = os.path.join(artifact_dir, "config.json")
+        with open(cfg_path, "w") as f:
+            json.dump(cfg, f, indent=2)
+
+        res_path = os.path.join(artifact_dir, "results.json")
+        with open(res_path, "w") as f:
+            json.dump(res, f, indent=2)
+
+        # optionally also save predictions
+        pred_path = os.path.join(artifact_dir, "pred.pkl")
+        with open(pred_path, "wb") as f:
+            pkl.dump(pred, f)        
+
+
+        
 
 
 if __name__ == "__main__":

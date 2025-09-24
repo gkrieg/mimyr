@@ -54,7 +54,7 @@ class Evaluator:
             #     print("soft correlation @",k,":",sc)
             #     results[f"soft_correlation@{k}"]=sc
 
-            for r in [0.03, 0.04, 0.05, 0.1]:
+            for r in [0.03, 0.04, 0.05, 0.07, 0.1]:
                 sc=soft_correlation(target_adata,target_adata.obsm["aligned_spatial"],predicted_adata,predicted_adata.obsm["spatial"],radius=r,sample=sample)
                 print("soft correlation radius @",r,":",sc)
                 results[f"soft_correlation_radius@{r}"]=sc
@@ -68,7 +68,7 @@ class Evaluator:
             #                       predicted_adata.obsm["spatial"],k=k,sample=sample)[0]
             #     print("soft f1 @",k,":",sp)
             #     results[f"soft_f1@{k}"]=sp
-            for r in [0.03, 0.04, 0.05]:
+            for r in [0.03, 0.04, 0.05, 0.07, 0.1]:
                 sp=soft_f1(target_adata,
                                   target_adata.obsm["aligned_spatial"],
                                   predicted_adata,
