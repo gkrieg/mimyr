@@ -417,7 +417,7 @@ class SliceDataLoader:
 
         elif self.mode == "rq3":
             # Only load slices1
-            slices = self.load_intra_slices()
+            slices = self.load_zhuangn_slices(n=2)
 
             # Alignment
             self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
@@ -481,6 +481,41 @@ class SliceDataLoader:
             self.fine_tune_val_slices = None
             self.fine_tune_test_slices = None
 
+
+
+        elif self.mode == "zhuang-1":
+            # Only load slices1
+            slices = self.load_zhuangn_slices(n=1)
+
+            # Alignment
+            self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
+            self.density_model.fit()
+            aligned_slices = self.density_model.get_common_coordinate_locations()
+
+            # Tokenization
+            self.gene_exp_model = GeneExpModel(aligned_slices, label=self.label)
+            self.gene_exp_model.fit()
+            slices_tokenized = self.gene_exp_model.get_tokenized_slices()
+
+            train_slices = slices_tokenized
+
+            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse.pt')
+            edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
+            new_train_slices = []
+            for s in train_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_train_slices.append(s)
+            train_slices = new_train_slices
+
+            self.train_slices = train_slices
+            self.val_slices = []
+            self.test_slices = []
+            self.reference_slices = []
+
+            # No fine-tuning slices in intra mode
+            self.fine_tune_train_slices = None
+            self.fine_tune_val_slices = None
+            self.fine_tune_test_slices = None
         # elif "rq2" in self.mode:
         #     # Only load slices1
         #     slices = self.load_rq2_slices()

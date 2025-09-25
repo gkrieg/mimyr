@@ -86,7 +86,7 @@ class Inferernce:
                         adata.n_obs,
                         self.location_model[1],
                         conditional_z=new_tissue.obsm["aligned_spatial"].mean(0)[-1],
-                        guidance_scale=0.0
+                        guidance_scale=0.1
                     )
             print(xyz)
             mask = np.all(np.isfinite(xyz), axis=1)
