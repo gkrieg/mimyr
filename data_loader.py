@@ -61,15 +61,20 @@ class SliceDataLoader:
             slices1 = [sc.read_h5ad(os.path.join(input_dir, fname)) for fname in sorted_slices1]
         return slices1
 
-    def load_zhuangn_slices(self, n=2,fast_select=None):
+    def load_zhuangn_slices(self, n=2,fast_select=None, remove_edges=True):
 
         print("Fast selecting", fast_select)
         
         # Load slices2
         input_dir = f"/work/magroup/skrieger/MERFISH_BICCN/processed_data/Zhuang-ABCA-{n}"
-        sorted_slices2 = sorted([
-            f for f in os.listdir(input_dir) if f.endswith(".h5ad")
-        ])[2:-2]
+        if remove_edges:
+            sorted_slices2 = sorted([
+                f for f in os.listdir(input_dir) if f.endswith(".h5ad")
+            ])[2:-2]
+        else:
+            sorted_slices2 = sorted([
+                f for f in os.listdir(input_dir) if f.endswith(".h5ad")
+            ])
         print(sorted_slices2)
         if fast_select:
             sorted_slices2 = [f for i,f in enumerate(sorted_slices2) if i in [fast_select-1,fast_select,fast_select+1]]
@@ -483,9 +488,77 @@ class SliceDataLoader:
 
 
 
-        elif self.mode == "zhuang-1":
+        elif self.mode == "rq4":
             # Only load slices1
-            slices = self.load_zhuangn_slices(n=1)
+            slices = self.load_zhuangn_slices(n=3, remove_edges=False)
+
+            # Alignment
+            self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
+            self.density_model.fit()
+            aligned_slices = self.density_model.get_common_coordinate_locations()
+
+            # Tokenization
+            self.gene_exp_model = GeneExpModel(aligned_slices, label=self.label)
+            self.gene_exp_model.fit()
+            slices_tokenized = self.gene_exp_model.get_tokenized_slices()
+
+            # Manual split
+            # [15, 18,  21,  24, 29, 32, 37,  40, 42,  44]
+            test_indices = [2, 5, 11, 14, 18]
+            val_indices = [7]
+
+
+            test_slices = [slices_tokenized[i] for i in test_indices]
+            val_slices = [slices_tokenized[i] for i in val_indices]
+
+            # Train = everything except test + val
+            train_indices = [0, 3, 12, 17]
+            train_slices = [slices_tokenized[i] for i in train_indices]
+
+
+            # references: you previously picked [27, 29], keep or adjust as needed
+            # References = neighbors (-1, +1) of test slices, if valid
+            ref_indices = [0, 3, 3, 7, 7, 12, 12, 17, 17, 17]
+
+            self.reference_slices = [slices_tokenized[i] for i in ref_indices]
+
+            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse.pt')
+            edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
+            new_train_slices = []
+            for s in train_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_train_slices.append(s)
+            train_slices = new_train_slices
+            new_reference_slices = []
+            for s in self.reference_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_reference_slices.append(s)
+            reference_slices = new_reference_slices
+            new_val_slices = []
+            for s in val_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_val_slices.append(s)
+            val_slices = new_val_slices
+            new_test_slices = []
+            for s in test_slices:
+                s = harmonize_dataset(s, meta_info, edges)
+                new_test_slices.append(s)
+            test_slices = new_test_slices
+
+            self.train_slices = train_slices
+            self.val_slices = val_slices
+            self.test_slices = test_slices
+            self.reference_slices = reference_slices
+
+            # No fine-tuning slices in intra mode
+            self.fine_tune_train_slices = None
+            self.fine_tune_val_slices = None
+            self.fine_tune_test_slices = None
+
+
+        elif self.mode == "zhuang-3":
+            # Only load slices1
+            slices = self.load_zhuangn_slices(n=3)
 
             # Alignment
             self.density_model = AlignementModel(slices, z_posn=[-1, 0, 1], pin_key="parcellation_structure", use_ccf=True)
