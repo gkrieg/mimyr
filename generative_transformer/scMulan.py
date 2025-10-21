@@ -1,10 +1,10 @@
 import torch
 import os
 import sys
-from model.model import MulanConfig, scMulanModel
-from model.model_kvcache import scMulanModel_kv
+from .model.model import MulanConfig, scMulanModel
+from .model.model_kvcache import scMulanModel_kv
 import torch.nn.functional as F
-from utils.hf_tokenizer import scMulanTokenizer
+from .utils.hf_tokenizer import scMulanTokenizer
 import scipy.sparse
 import numpy as np
 from tqdm import tqdm
@@ -674,7 +674,6 @@ def model_generate(ckp_path: str,
                     meta_info: dict,
                     use_kv_cache: bool=False,
                     n_express_level: int = 100,
-                    compute_bin_edges: bool = False,
                     **kwargs,
                     ):
     
@@ -682,12 +681,9 @@ def model_generate(ckp_path: str,
     # ckp['model_args']['expression_level'] = 100
     gptconf = MulanConfig(**ckp['model_args'])
     gptconf.vocab_size = len(meta_info['token_set'])
-    if compute_bin_edges == True:
-        # bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],gptconf.expression_level)
-        bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],n_express_level)
-        gptconf.bin_edges = bin_edges
-    else:
-        bin_edges = None
+    # bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],gptconf.expression_level)
+    bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],n_express_level)
+    gptconf.bin_edges = bin_edges
     gptconf.dropout = 0.0
     # print(gptconf)
 

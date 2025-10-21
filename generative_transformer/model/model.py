@@ -91,7 +91,7 @@ class MulanConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True 
-    train_mode: str = 'pretrian'
+    train_mode: str = 'pretrain'
     expression_level: int = 10
     ele: int = 0
     bin_edges: np.ndarray = None
@@ -117,14 +117,6 @@ class scMulanModel(nn.Module):
         ))
             
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
-        # self.epx_head = nn.Linear(config.n_embd, config.vocab_size, bias=False) # expr level
-
-        # self.epx_regressor = nn.Sequential(
-        #     nn.Linear(config.vocab_size, config.n_embd),  # map vocab→hidden
-        #     nn.ReLU(),
-        #     nn.Linear(config.n_embd, 1)                   # hidden→scalar
-        # )
-
         self.epx_head = nn.Linear(config.n_embd, config.expression_level + 1, bias=False)  # +1 for 0 bin
 
         self.epx_regressor = nn.Sequential(
@@ -160,7 +152,6 @@ class scMulanModel(nn.Module):
         new_emb = nn.Embedding(new_num_tokens, emb_dim)
         with torch.no_grad():
             new_emb.weight[:old_num].copy_(old_emb)
-            # rows [old_num:] are randomly init per nn.Embedding default
         self.transformer.wte = new_emb
 
         # 2) New LM head (tied weights in many HF models)
@@ -169,21 +160,9 @@ class scMulanModel(nn.Module):
         with torch.no_grad():
             new_head.weight[:old_num].copy_(old_head)
         self.lm_head = new_head
-
-        # old_head2 = self.epx_head.weight.data  # shape (old_num, emb_dim)
-        # new_head2 = nn.Linear(emb_dim, new_num_tokens, bias=False)
-        # with torch.no_grad():
-        #     new_head2.weight[:old_num].copy_(old_head2)
-        # self.epx_head = new_head2
-
+        
         # 3) Update config
         self.config.vocab_size = new_num_tokens
-
-        # self.epx_regressor = nn.Sequential(
-        #         nn.Linear(self.config.vocab_size, self.config.n_embd),  # map vocab→hidden
-        #         nn.ReLU(),
-        #         nn.Linear(self.config.n_embd, 1)                   # hidden→scalar
-        #     )
 
     def resize_expression_embeddings(self, new_expression_level: int):
         """
@@ -191,19 +170,15 @@ class scMulanModel(nn.Module):
         to support values 0…new_expression_level (inclusive),
         copying old weights and randomly initializing any new rows.
         """
-        # how many bins we used to have (including zero)
         old_emb = self.transformer.wee.weight.data
         old_num, emb_dim = old_emb.shape
 
-        # how many we now want (remember wee was built with +1)
         new_num = new_expression_level + 1
 
         # 1) new embedding
         new_emb = nn.Embedding(new_num, emb_dim)
         with torch.no_grad():
-            # copy over the old rows
             new_emb.weight[:old_num].copy_(old_emb)
-            # rows [old_num:] are freshly initialized
         self.transformer.wee = new_emb
 
         # 2) update config so that later calls (or re-initializations) know the new max
@@ -217,47 +192,56 @@ class scMulanModel(nn.Module):
             nn.Linear(self.config.n_embd, 1)
         )
 
-
     def forward(self, 
                 idx=None,
                 inputs_embeds=None,
-                targets=None,     # token IDs for attr‐prediction (shape [B])
+                targets=None,     # gene token IDs (B, T)
                 xlen=None,
                 x_prefix_len=None,
-                x_expr=None,      # input expression for embedding head
-                y_expr=None,      # true expression values for regression loss (shape [B])
+                x_expr=None,      # binned expression labels (B, T)
+                y_expr=None,      # real-valued expression (B, T)
                 lambda_val: float = 1.0,
-                return_hidden=False,
-    ):
-        
+                return_hidden=False):
+    
         if idx is not None:
             b, t = idx.size()
-            tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-
+            tok_emb = self.transformer.wte(idx)
         if inputs_embeds is not None:
             tok_emb = inputs_embeds
-
-        expr_emb = self.transformer.wee(x_expr) # expression embeddings of shape (b, t, n_embd)
+    
+        expr_emb = self.transformer.wee(x_expr)
         x = self.transformer.drop(tok_emb + expr_emb)
-
+    
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
-
-        logits_labels = self.lm_head(x) 
-        # logits_exp = self.epx_head(x).squeeze(-1)
+    
+        logits_labels = self.lm_head(x)                       # (B, T, vocab_size)
         logits_exp_bins = self.epx_head(x)                    # (B, T, num_bins)
         logits_exp_real = self.epx_regressor(logits_exp_bins) # (B, T, 1)
-        loss = None
-        loss_cls = None
-        loss_exp = None
-        loss_exp_bin = None
-        
-       
-        # 2) Classification loss over all tokens (causal shift)
+    
+        loss = loss_cls = loss_exp_bin = loss_exp_real = None
+        eos_token_id = 0
+        B, T, V = logits_labels.shape
+        num_bins = logits_exp_bins.shape[-1]
+    
         if targets is not None:
-            B, T, V = logits_labels.shape
-            # shift so that at step t we predict targets[:,t] from x[:,t-1]
+            ### --- Set Classification Loss ---
+
+            # logits_labels: (B, T, V)
+            # probs = F.softmax(logits_labels, dim=-1)       # (B, T, V)
+            # pred_set_soft = probs.sum(dim=1)               # (B, V)
+            
+            # # True set vector (B, V)
+            # mask = (targets != -100)
+            # flat_indices = targets[mask]
+            # batch_indices = torch.arange(B, device=targets.device).unsqueeze(1).expand(B, T)[mask]
+            # true_set = torch.zeros((B, V), device=targets.device)
+            # true_set.index_put_((batch_indices, flat_indices), torch.ones_like(flat_indices, dtype=torch.float), accumulate=True)
+            # true_set = true_set.clamp(max=1.0)
+            
+            # loss_cls = F.binary_cross_entropy(pred_set_soft.clamp(min=1e-6, max=1.0), true_set)
+
             shift_logits = logits_labels[:, :-1, :].reshape(-1, V)   # (B*(T-1), V)
             shift_labels = targets[:, 1:].reshape(-1)             # (B*(T-1))
             loss_cls = F.cross_entropy(
@@ -265,71 +249,254 @@ class scMulanModel(nn.Module):
                 shift_labels,
                 ignore_index=-100
             )
-
-        
-        if y_expr is not None:
-            B, T, V = logits_exp_bins.shape
-            x_expr_masked = x_expr.clone()
-            x_expr_masked[targets == -100] = -100
-
-            shift_exp_logits = logits_exp_bins[:, :-1, :].reshape(-1, V) 
-            shift_exp_labels = x_expr_masked[:, 1:].reshape(-1)  
-            loss_exp_bin = F.cross_entropy(shift_exp_logits, shift_exp_labels, ignore_index=-100)
-
-        loss_exp_real = None
-        if y_expr is not None:
-            pred_vals = logits_exp_real.squeeze(-1)
-            true_vals = y_expr.squeeze(-1) if y_expr.dim() == 3 else y_expr
-        
-            shift_pred = pred_vals[:, :-1].contiguous()
-            shift_true = true_vals[:, 1:].contiguous()
-            loss_exp_real = F.mse_loss(shift_pred, shift_true, reduction='mean')
-
-
-        # B, T, V = logits_exp.size()
-        # flat_exp = logits_exp.view(-1, V)             # (B*T, V)
-        # flat_reg = self.epx_regressor(flat_exp)       # (B*T, 1)
-        # logits_reg = flat_reg.view(B, T, 1)           # (B, T, 1)
-
-        # 3) Expression loss over all tokens (aligned or shifted as needed)
-        # if y_expr is not None:
-        #     # If you want causal‐style (predict y_expr[:,t] from x[:,t-1]):
-        #     #   pred_vals = logits_exp[:, :-1].reshape(-1)
-        #     #   true_vals = y_expr[:, 1:].reshape(-1)
-        #     # Otherwise, to predict at each position:
-
-        #     pred_vals = logits_reg.squeeze(-1)
-        #     shift_pred = pred_vals[:,:-1].contiguous()
-        #     # true_vals: ensure same shape
-        #     true_vals = y_expr.squeeze(-1) if y_expr.dim()==3 else y_expr
-        #     shift_true = true_vals[:,1:].contiguous()
-
-        #     flat_pred = shift_pred.view(-1)
-        #     flat_true = shift_true.view(-1)
             
-        #     loss_exp = F.mse_loss(pred_vals, true_vals, reduction='mean')
+            # targets_shifted = targets[:, 1:]                        # (B, T-1)
+            # eos_mask = (targets_shifted == eos_token_id)            # (B, T-1)
+            
+            # first_eos_pos = eos_mask.float().cumsum(dim=1) == 1.0   # (B, T-1)
+            # flat_logits = logits_labels[:, :-1, :].reshape(-1, V)   # (B*(T-1), V)
+            # flat_first_eos = first_eos_pos.reshape(-1)              # (B*(T-1),)
+            
+            # eos_indices = flat_first_eos.nonzero(as_tuple=False).squeeze(-1)  # (N_valid,)
+            # eos_logits = flat_logits[eos_indices]                              # (N_valid, V)
+            
+            # eos_targets = torch.full((eos_logits.size(0),), eos_token_id, dtype=torch.long, device=logits_labels.device)
+            
+            # if eos_logits.size(0) > 0:
+            #     eos_loss = F.cross_entropy(eos_logits, eos_targets, reduction='mean')
+            # else:
+            #     eos_loss = torch.tensor(0.0, device=logits_labels.device)
+            # loss_cls += eos_loss
+    
+            ### --- Set Binned Expression Loss ---
+            # if x_expr is not None:
+                
+            #     P_gene = F.softmax(logits_labels, dim=-1)        # (B, T, V)
+            #     P_bin  = F.softmax(logits_exp_bins, dim=-1)      # (B, T, num_bins)
+                
+            #     # Efficient computation: (B, V, T) x (B, T, num_bins) → (B, V, num_bins)
+            #     pred_binned_expr = torch.bmm(P_gene.transpose(1, 2), P_bin)  # (B, V, num_bins)
+            #     B, V, num_bins = pred_binned_expr.shape
 
+            #     true_bin_labels = torch.full((B, V), -100, dtype=torch.long, device=targets.device)
+                
+            #     # Fill true labels using scatter
+            #     mask = (targets != -100)
+            #     flat_gene_ids = targets[mask]                    # (num_valid,)
+            #     flat_bin_vals = x_expr[mask]                     # (num_valid,)
+            #     flat_batch_ids = torch.arange(B, device=targets.device).unsqueeze(1).expand(B, T)[mask]
+                
+            #     # Assign to the true_bin_labels
+            #     true_bin_labels.index_put_(
+            #         (flat_batch_ids, flat_gene_ids),
+            #         flat_bin_vals,
+            #         accumulate=False
+            #     )
+                
+            #     # Mask to select only genes that appeared in the true targets
+            #     true_gene_mask = torch.zeros((B, V), dtype=torch.bool, device=targets.device)
+            #     true_gene_mask.index_put_(
+            #         (flat_batch_ids, flat_gene_ids),
+            #         torch.ones_like(flat_gene_ids, dtype=torch.bool),
+            #         accumulate=True
+            #     )
+                
+            #     # Apply mask to loss
+            #     # loss_exp_bin = F.cross_entropy(
+            #     #     pred_binned_expr[true_gene_mask],       # (num_true_genes, num_bins)
+            #     #     true_bin_labels[true_gene_mask]         # (num_true_genes,)
+            #     # )
+            #     loss_exp_bin = F.cross_entropy(
+            #         pred_binned_expr.reshape(-1, num_bins),       # (V, num_bins)
+            #         true_bin_labels.reshape(-1)        # (V,)
+            #     )
 
-        # if (loss_cls is not None) and (loss_exp is not None):
-        #     loss = loss_cls + lambda_val * loss_exp
-        # elif loss_cls is not None:
-        #     loss = loss_cls
-        # elif loss_exp is not None:
-        #     loss = lambda_val * loss_exp
+            #     P_gene = F.softmax(logits_labels, dim=-1)                # (B, T, V)
+            #     P_gene_T = P_gene.transpose(1, 2)                         # (B, V, T)
+                
+            #     # Step 2: Predicted real expression values
+            #     pred_real = logits_exp_real.squeeze(-1)                  # (B, T)
+                
+            #     # Step 3: Weighted sum over time — use bmm
+            #     # (B, V, T) x (B, T, 1) -> (B, V, 1) -> squeeze -> (B, V)
+            #     pred_real_by_gene = torch.bmm(P_gene_T, pred_real.unsqueeze(-1)).squeeze(-1)  # (B, V)
 
+            #     # Step 3: true real expression values
+            #     true_real_by_gene = torch.zeros((B, V), device=targets.device)
+
+            #     flat_real_vals = y_expr[mask]
+                
+            #     # Scatter the real values into the (B, V) matrix
+            #     true_real_by_gene.index_put_(
+            #         (flat_batch_ids, flat_gene_ids),
+            #         flat_real_vals,
+            #         accumulate=False
+            #     )
+                
+            #     # Final masked MSE loss
+            #     # loss_exp_real = F.mse_loss(
+            #     #     pred_real_by_gene[true_gene_mask],
+            #     #     true_real_by_gene[true_gene_mask]
+            #     # )
+            #     loss_exp_real = F.mse_loss(
+            #         pred_real_by_gene,
+            #         true_real_by_gene
+            #     )
+
+            if x_expr is not None:
+                B, T, V = logits_exp_bins.shape
+                x_expr_masked = x_expr.clone()
+                x_expr_masked[targets == -100] = -100
+    
+                shift_exp_logits = logits_exp_bins[:, :-1, :].reshape(-1, V) 
+                shift_exp_labels = x_expr_masked[:, 1:].reshape(-1)  
+                loss_exp_bin = F.cross_entropy(shift_exp_logits, shift_exp_labels, ignore_index=-100)
+    
+            loss_exp_real = None
+            if y_expr is not None:
+                pred_vals = logits_exp_real.squeeze(-1)
+                true_vals = y_expr.squeeze(-1) if y_expr.dim() == 3 else y_expr
+            
+                shift_pred = pred_vals[:, :-1].contiguous()
+                shift_true = true_vals[:, 1:].contiguous()
+                loss_exp_real = F.mse_loss(shift_pred, shift_true, reduction='mean')
+
+    
+        # Final loss
         if (loss_cls is not None) and (loss_exp_real is not None) and (loss_exp_bin is not None):
             loss = loss_cls + lambda_val * (loss_exp_real + loss_exp_bin)
         elif loss_cls is not None:
             loss = loss_cls
         elif loss_exp_real is not None and loss_exp_bin is not None:
             loss = lambda_val * (loss_exp_real + loss_exp_bin)
-
-
-
+    
         if return_hidden:
             return logits_labels, logits_exp_bins, logits_exp_real, x
         else:
             return logits_labels, logits_exp_bins, logits_exp_real, loss, loss_cls, loss_exp_bin, loss_exp_real
+
+
+
+    # def forward(self, 
+    #             idx=None,
+    #             inputs_embeds=None,
+    #             targets=None,     # token IDs for attr‐prediction (shape [B])
+    #             xlen=None,
+    #             x_prefix_len=None,
+    #             x_expr=None,      # input expression for embedding head
+    #             y_expr=None,      # true expression values for regression loss (shape [B])
+    #             lambda_val: float = 1.0,
+    #             return_hidden=False,
+    # ):
+        
+    #     if idx is not None:
+    #         b, t = idx.size()
+    #         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+
+    #     if inputs_embeds is not None:
+    #         tok_emb = inputs_embeds
+
+    #     expr_emb = self.transformer.wee(x_expr) # expression embeddings of shape (b, t, n_embd)
+    #     x = self.transformer.drop(tok_emb + expr_emb)
+
+    #     for block in self.transformer.h:
+    #         x = block(x)
+    #     x = self.transformer.ln_f(x)
+
+    #     logits_labels = self.lm_head(x) 
+    #     # logits_exp = self.epx_head(x).squeeze(-1)
+    #     logits_exp_bins = self.epx_head(x)                    # (B, T, num_bins)
+    #     logits_exp_real = self.epx_regressor(logits_exp_bins) # (B, T, 1)
+    #     loss = None
+    #     loss_cls = None
+    #     loss_exp = None
+    #     loss_exp_bin = None
+        
+        
+    #     eos_token_id = 0
+    #     eos_weight = 2.0
+        
+       
+    #     # 2) Classification loss over all tokens (causal shift)
+    #     if targets is not None:
+    #         B, T, V = logits_labels.shape
+    #         # shift so that at step t we predict targets[:,t] from x[:,t-1]
+    #         shift_logits = logits_labels[:, :-1, :].reshape(-1, V)   # (B*(T-1), V)
+    #         shift_labels = targets[:, 1:].reshape(-1)             # (B*(T-1))
+    #         # loss_weights = torch.ones_like(shift_labels, dtype=torch.float)
+    #         # loss_weights[shift_labels == eos_token_id] = eos_weight 
+            
+    #         loss_cls = F.cross_entropy(
+    #             shift_logits,
+    #             shift_labels,
+    #             ignore_index=-100,
+    #             # weight=loss_weights.view(-1),
+    #         )
+
+        
+    #     if y_expr is not None:
+    #         B, T, V = logits_exp_bins.shape
+    #         x_expr_masked = x_expr.clone()
+    #         x_expr_masked[targets == -100] = -100
+
+    #         shift_exp_logits = logits_exp_bins[:, :-1, :].reshape(-1, V) 
+    #         shift_exp_labels = x_expr_masked[:, 1:].reshape(-1)  
+    #         loss_exp_bin = F.cross_entropy(shift_exp_logits, shift_exp_labels, ignore_index=-100)
+
+    #     loss_exp_real = None
+    #     if y_expr is not None:
+    #         pred_vals = logits_exp_real.squeeze(-1)
+    #         true_vals = y_expr.squeeze(-1) if y_expr.dim() == 3 else y_expr
+        
+    #         shift_pred = pred_vals[:, :-1].contiguous()
+    #         shift_true = true_vals[:, 1:].contiguous()
+    #         loss_exp_real = F.mse_loss(shift_pred, shift_true, reduction='mean')
+
+
+    #     # B, T, V = logits_exp.size()
+    #     # flat_exp = logits_exp.view(-1, V)             # (B*T, V)
+    #     # flat_reg = self.epx_regressor(flat_exp)       # (B*T, 1)
+    #     # logits_reg = flat_reg.view(B, T, 1)           # (B, T, 1)
+
+    #     # 3) Expression loss over all tokens (aligned or shifted as needed)
+    #     # if y_expr is not None:
+    #     #     # If you want causal‐style (predict y_expr[:,t] from x[:,t-1]):
+    #     #     #   pred_vals = logits_exp[:, :-1].reshape(-1)
+    #     #     #   true_vals = y_expr[:, 1:].reshape(-1)
+    #     #     # Otherwise, to predict at each position:
+
+    #     #     pred_vals = logits_reg.squeeze(-1)
+    #     #     shift_pred = pred_vals[:,:-1].contiguous()
+    #     #     # true_vals: ensure same shape
+    #     #     true_vals = y_expr.squeeze(-1) if y_expr.dim()==3 else y_expr
+    #     #     shift_true = true_vals[:,1:].contiguous()
+
+    #     #     flat_pred = shift_pred.view(-1)
+    #     #     flat_true = shift_true.view(-1)
+            
+    #     #     loss_exp = F.mse_loss(pred_vals, true_vals, reduction='mean')
+
+
+    #     # if (loss_cls is not None) and (loss_exp is not None):
+    #     #     loss = loss_cls + lambda_val * loss_exp
+    #     # elif loss_cls is not None:
+    #     #     loss = loss_cls
+    #     # elif loss_exp is not None:
+    #     #     loss = lambda_val * loss_exp
+
+    #     if (loss_cls is not None) and (loss_exp_real is not None) and (loss_exp_bin is not None):
+    #         loss = loss_cls + lambda_val * (loss_exp_real + loss_exp_bin)
+    #     elif loss_cls is not None:
+    #         loss = loss_cls
+    #     elif loss_exp_real is not None and loss_exp_bin is not None:
+    #         loss = lambda_val * (loss_exp_real + loss_exp_bin)
+
+
+
+    #     if return_hidden:
+    #         return logits_labels, logits_exp_bins, logits_exp_real, x
+    #     else:
+    #         return logits_labels, logits_exp_bins, logits_exp_real, loss, loss_cls, loss_exp_bin, loss_exp_real
 
 
 
