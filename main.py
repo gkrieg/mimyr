@@ -65,10 +65,10 @@ def get_args():
                         default="model_checkpoints/best_model_intra2hole.pt",
                         help="Path to trained location checkpoint")
     parser.add_argument("--cluster_model_checkpoint", type=str,  ### CHANGE
-                        default="experimentation/best_model_cluster1.pt",
+                        default="experimentation/best_model_rq3.pt",
                         help="Path to trained CelltypeModel checkpoint")    
     parser.add_argument("--expression_model_checkpoint", type=str,  ### CHANGE
-                            default="/compute/oven-0-13/skrieger/mouse-mediummodelscrna2/epoch140_model.pt",
+                            default="/compute/oven-0-13/skrieger/Zhuang-2/epoch120_model.pt",
                             help="Path to trained expression checkpoint")
 
     parser.add_argument("--location_inference_type", type=str, default="skip",
@@ -77,9 +77,9 @@ def get_args():
                         help="Bandwidth for KDE")
 
     parser.add_argument("--cluster_inference_type", type=str,
-                        default="model",
+                        default="skip",
                         help="How to infer subclass")
-    parser.add_argument("--expression_inference_type", type=str, default="end",
+    parser.add_argument("--expression_inference_type", type=str, default="model",
                         help="How to infer gene expression")
 
 
@@ -88,6 +88,9 @@ def get_args():
                         help="Training epochs for CelltypeModel")
     parser.add_argument("--learning_rate", type=float, default=0.001,
                         help="Learning rate for CelltypeModel")
+    parser.add_argument("--guidance_signal", type=float, default=0.01,
+                        help="Guidance signal for classifier-based guidance")
+
     parser.add_argument("--batch_size", type=int, default=1024,
                         help="Batch size for CelltypeModel")
     parser.add_argument("--device", type=str, default="cuda",
@@ -97,12 +100,12 @@ def get_args():
         "--metrics",
         type=lambda s: s.split(","),
         help="Comma-separated list of metrics to compute (soft_accuracy,soft_correlation,neighborhood_enrichment,soft_precision)",
-        default=["soft_accuracy"]#"soft_f1","soft_correlation"]#,"soft_accuracy", "soft_correlation", "neighborhood_enrichment", "soft_precision"],
+        default=["soft_f1","soft_correlation"]#,"soft_accuracy", "soft_correlation", "neighborhood_enrichment", "soft_precision"],
     )
     parser.add_argument("--metric_sampling", type=int, default=1, 
                         help="Percentage of samples to use for metric computation")
     parser.add_argument("--out_csv", type=str,
-                        default="results/rq3_cluster_ablation.csv",
+                        default="results/debugging_rq3_spencer.csv",
                         help="Output CSV file path")
 
 
@@ -177,7 +180,7 @@ def main():
 
         
 
-        trainer = DDPMTrainer(ad.concat(slice_data_loader.train_slices).obsm["aligned_spatial"], traincfg)
+        trainer = DDPMTrainer(None, traincfg)
 
         ckpt = torch.load("/compute/oven-0-13/aj_checkpoints/full_ddpm_checkpoint_4_3600.pt", map_location=trainer.device)
         trainer.model.load_state_dict(ckpt["model"])

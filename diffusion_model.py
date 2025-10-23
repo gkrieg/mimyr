@@ -224,15 +224,22 @@ class DDPMTrainer:
         self.cfg = cfg
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        self.mean = coords_np.mean(axis=0, keepdims=True)
-        self.std  = coords_np.std(axis=0, keepdims=True) + 1e-8
-        x = (coords_np - self.mean) / self.std
-        self.data = torch.tensor(x, dtype=torch.float32)
-        dataset = TensorDataset(self.data)
-        self.loader = DataLoader(
-            dataset, batch_size=cfg.batch_size, shuffle=True, drop_last=False
-        )
-        self.coords_np=coords_np
+
+        if coords_np is None:
+            self.mean=np.array([[5.72180726, 3.86796997, 7.3023877 ]])
+            self.std=np.array([[2.28143343, 1.64970914, 2.85336571]])
+            print("Skipping data loading as coords_np is None")
+        else:
+            self.mean = coords_np.mean(axis=0, keepdims=True)
+            self.std  = coords_np.std(axis=0, keepdims=True) + 1e-8
+
+            x = (coords_np - self.mean) / self.std
+            self.data = torch.tensor(x, dtype=torch.float32)
+            dataset = TensorDataset(self.data)
+            self.loader = DataLoader(
+                dataset, batch_size=cfg.batch_size, shuffle=True, drop_last=False
+            )
+            self.coords_np=coords_np
 
         # schedule builder
         def _build_schedules(cfg: TrainConfig):
@@ -276,13 +283,13 @@ class DDPMTrainer:
         self.alpha_bars = alpha_bars.to(self.device)
 
         self.model = NoisePredictor(
-            input_dim=coords_np.shape[1],
+            input_dim=3,
             degree=cfg.degree,
             hidden_sizes=cfg.hidden_sizes,
             activation=cfg.activation,
             batchnorm=cfg.batchnorm,
             dropout=cfg.dropout,
-            out_dim=coords_np.shape[1],
+            out_dim=3,
             feature_type=cfg.feature_type,
         ).to(self.device)
 
@@ -362,13 +369,13 @@ class DDPMTrainer:
 
 
         model = NoisePredictor(
-            input_dim=self.coords_np.shape[1],
+            input_dim=3,
             degree=self.cfg.degree,
             hidden_sizes=self.cfg.hidden_sizes,
             activation=self.cfg.activation,
             batchnorm=self.cfg.batchnorm,
             dropout=self.cfg.dropout,
-            out_dim=self.coords_np.shape[1],
+            out_dim=3,
             feature_type=self.cfg.feature_type,
         ).to(self.device)
         model.load_state_dict(self.model.state_dict())
@@ -388,7 +395,7 @@ class DDPMTrainer:
             if fixed_cond_noise:
                 cond_eps_fixed = torch.randn(n_samples, device=self.device)
 
-        x = torch.randn(n_samples, self.coords_np.shape[1], device=self.device)
+        x = torch.randn(n_samples, 3, device=self.device)
         for t in reversed(range(self.cfg.n_timesteps-1)):
             beta_t = self.betas[t]
             alpha_t = self.alphas[t]
@@ -427,19 +434,19 @@ class DDPMTrainer:
         potential_model: torch.nn.Module, takes coords [B,3] -> scalar potential [B]
         guidance_scale: float, multiplier on ∇ log p(y|x) ≈ ∇(-potential)
         """
-
+        print("USing std and mean",self.std,self.mean)
         if conditional_z is not None:
             conditional_z = (conditional_z - self.mean[0,2]) / self.std[0,2]
 
         # restore model with EMA if needed
         model = NoisePredictor(
-            input_dim=self.coords_np.shape[1],
+            input_dim=3,
             degree=self.cfg.degree,
             hidden_sizes=self.cfg.hidden_sizes,
             activation=self.cfg.activation,
             batchnorm=self.cfg.batchnorm,
             dropout=self.cfg.dropout,
-            out_dim=self.coords_np.shape[1],
+            out_dim=3,
             feature_type=self.cfg.feature_type,
         ).to(self.device)
         model.load_state_dict(self.model.state_dict())
@@ -450,7 +457,7 @@ class DDPMTrainer:
         # potential_model.eval()
 
         # initial Gaussian
-        x = torch.randn(n_samples, self.coords_np.shape[1], device=self.device)
+        x = torch.randn(n_samples, 3, device=self.device)
 
         for t in reversed(range(self.cfg.n_timesteps-1)):
             beta_t = self.betas[t]

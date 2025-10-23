@@ -420,7 +420,7 @@ import tqdm
 from scipy.spatial import cKDTree
 from scipy.stats import pearsonr
 
-def soft_correlation(gt_adata, gt_positions, pred_adata, pred_positions, radius=None, k=0, sample=None):
+def soft_correlation(gt_adata, gt_positions, pred_adata, pred_positions, radius=None, k=0, sample=None, return_list=False):
     """
     gt_expressions, pred_expressions: list or array of gene expression vectors (shape [num_cells, num_genes])
     gt_positions, pred_positions: list or array of positions (shape [num_cells, 2] or [num_cells, 3])
@@ -448,6 +448,7 @@ def soft_correlation(gt_adata, gt_positions, pred_adata, pred_positions, radius=
     else:
         samples = gt_positions
 
+    correlations_all = []
     for i, pos in tqdm(list(enumerate(samples))):
         if k > 0:
             gt_distances, gt_indices = gt_tree.query(pos, k=k+1)
@@ -464,6 +465,10 @@ def soft_correlation(gt_adata, gt_positions, pred_adata, pred_positions, radius=
         gt_sums.append(gt_sum)
         pred_sums.append(pred_sum)
 
+        pred_sum[0]=pred_sum[0]+1e-15  # to avoid NaN in pearsonr when pred_sum is all zeros
+
+        correlations_all.append(pearsonr(gt_sum, pred_sum)[0])
+
         if i % 10000 == 0 and i > 0:
             print(f"Processed {i} samples...")
 
@@ -472,6 +477,9 @@ def soft_correlation(gt_adata, gt_positions, pred_adata, pred_positions, radius=
 
     if len(gt_sums) == 0 or len(pred_sums) == 0:
         return 0.0
+
+    if return_list:
+        return correlations_all
 
     correlation, _ = pearsonr(gt_sums, pred_sums)
     return correlation
@@ -602,7 +610,7 @@ def soft_precision(gt_adata, gt_positions, pred_adata, pred_positions, radius=No
 
 
 
-def soft_f1(gt_adata, gt_positions, pred_adata, pred_positions, radius=None, k=0, sample=None):
+def soft_f1(gt_adata, gt_positions, pred_adata, pred_positions, radius=None, k=0, sample=None, return_list=False):
     """
     gt_expressions, pred_expressions: array of shape [num_cells, num_genes]
     gt_positions, pred_positions: array of shape [num_cells, 2] or [num_cells, 3]
@@ -661,6 +669,8 @@ def soft_f1(gt_adata, gt_positions, pred_adata, pred_positions, radius=None, k=0
         if i and i % 10000 == 0:
             print(f"Processed {i} spots...")
 
+    if return_list:
+        return f1s
     return float(np.mean(f1s)) if f1s else 0.0, float(np.mean(precisions)) if precisions else 0.0, float(np.mean(recalls)) if recalls else 0.0
 
 

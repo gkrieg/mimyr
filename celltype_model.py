@@ -382,3 +382,131 @@ class SkeletonCelltypeModel(nn.Module):
     def save_model(self, path):
         torch.save(self.model.state_dict(), path)
         print(f"💾 Saved model weights to {path}")
+
+
+from copy import deepcopy
+from torch.utils.data import DataLoader, TensorDataset
+import torch
+
+from copy import deepcopy
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+from metrics import soft_accuracy  # keep this import
+
+class SkeletonCelltypeModel2(nn.Module):
+    def __init__(self, n_classes, num_features=3, learning_rate=0.001, device=None):
+        super(SkeletonCelltypeModel2, self).__init__()
+
+        self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
+
+        self.model = Model(
+            num_features=num_features,
+            num_classes=n_classes,
+            distance_transform_off=False,
+            memory_off=True,
+            rff_off=True,
+            attention_off=True
+        ).to(self.device)
+
+        self.loss_fn = nn.CrossEntropyLoss()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
+        self.best_model = None
+
+    def forward(self, x):
+        return self.model(x)
+
+    def fit(self, train_adata, val_adata=None, batch_size=32, epochs=10):
+        X_train = torch.tensor(train_adata.obsm["aligned_spatial"], dtype=torch.float32).to(self.device)
+        y_train = torch.tensor(train_adata.obs["token"].values, dtype=torch.long).to(self.device)
+
+        dataset = TensorDataset(X_train, y_train)
+        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+        best_val_score = -1
+        val_scores = []
+        early_stop_patience = 5
+        epochs_since_improvement = 0
+
+        for epoch in range(epochs):
+            total_loss, correct, total = 0.0, 0, 0
+
+            if val_adata is not None and (epoch + 1) % 1 == 0:
+                val_score = self.evaluate_val(val_adata)
+                val_scores.append(val_score)
+                print(f"🔍 Validation soft accuracy at epoch {epoch+1}: {val_score:.4f}")
+
+                if val_score > best_val_score:
+                    best_val_score = val_score
+                    self.best_model = deepcopy(self.model)
+                    epochs_since_improvement = 0
+                else:
+                    epochs_since_improvement += 1
+
+                if epochs_since_improvement >= early_stop_patience:
+                    print("⏹️ Early stopping triggered due to no improvement.")
+                    break
+
+            for xb, yb in dataloader:
+                self.optimizer.zero_grad()
+                outputs = self.model(xb)
+                loss = self.loss_fn(outputs, yb)
+                loss.backward()
+                self.optimizer.step()
+
+                total_loss += loss.item()
+                preds = torch.argmax(outputs, dim=1)
+                correct += (preds == yb).sum().item()
+                total += yb.size(0)
+
+            avg_loss = total_loss / len(dataloader)
+            acc = correct / total
+            print(f"🚀 Epoch [{epoch+1}/{epochs}] - Loss: {avg_loss:.4f} - Accuracy: {acc:.4f}")
+
+        if self.best_model is not None:
+            self.model = self.best_model
+            torch.save(self.model.state_dict(), "best_model.pt")
+            print("💾 Best model restored and saved to best_model.pt")
+
+    def evaluate_val(self, val_adata):
+        with torch.no_grad():
+            val_x_full = torch.tensor(val_adata.obsm["aligned_spatial"], dtype=torch.float32).to(self.device)
+            n = val_x_full.shape[0]
+            sample_size = max(1, n // 100)
+            idx = np.random.choice(n, sample_size, replace=False)
+
+            val_x = val_x_full[idx]
+            outputs = self.model(val_x)
+            probs = torch.softmax(outputs, dim=1).cpu().numpy()
+            preds = [np.random.choice(probs.shape[1], p=probs[i]) for i in range(probs.shape[0])]
+
+        gt_celltypes = val_adata.obs["token"].to_numpy()[idx].tolist()
+        gt_positions = val_adata.obsm["aligned_spatial"][idx]
+        pred_positions = val_adata.obsm["aligned_spatial"][idx]
+        pred_celltypes = preds
+
+        return soft_accuracy(gt_celltypes, gt_positions, pred_celltypes, pred_positions, k=20)
+
+    def get_token_distr(self, x):
+        self.model.eval()
+        with torch.no_grad():
+            x = x.to(self.device).unsqueeze(0)
+            logits = self.model(x)
+            probs = torch.softmax(logits, dim=1)
+        return probs.cpu().numpy()
+
+    def sample_output(self, x):
+        probs = self.get_token_distr(x).flatten()
+        return np.random.choice(len(probs), p=probs)
+
+    def load_model(self, path):
+        self.model.load_state_dict(torch.load(path, map_location=self.device))
+        self.model.to(self.device)
+        print(f"📦 Loaded model weights from {path}")
+
+    def save_model(self, path):
+        torch.save(self.model.state_dict(), path)
+        print(f"💾 Saved model weights to {path}")

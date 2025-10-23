@@ -187,7 +187,14 @@ def generate_anndata_from_samples(region_model, xyz, device="cuda", sample_from_
                 ])
         else:
             input_tensor = xyz_tensor
-            logits = region_model.model(input_tensor)  # [N, C]
+            # logits = region_model.model(input_tensor)  # [N, C]
+            batch_size = 1000
+            outputs = []
+            for i in range(0, input_tensor.size(0), batch_size):
+                logits_batch = region_model.model(input_tensor[i:i+batch_size])
+                outputs.append(logits_batch)
+            logits = torch.cat(outputs, dim=0)
+
 
             if graph_smooth:
                 # Apply 1-hop GCN-like smoothing (average neighbor logits)
