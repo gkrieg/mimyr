@@ -13,3 +13,5 @@ model_checkpoints
 *.png
 artifacts
 plot_creator.ipynb
+plots
+main.ipynb

@@ -64,9 +64,19 @@ class Inferernce:
                         self.slice_data_loader.train_slices[0].n_obs*3,
                         self.location_model[1],
                         conditional_z=new_tissue.obsm["aligned_spatial"].mean(0)[-1],
-                        guidance_scale=0.0
+                        guidance_scale=self.config["guidance_signal"]
                     )
                 xyz = xyz[np.linalg.norm(xyz - self.slice_data_loader.hole_centers[0], axis=1) < 0.3][:len(new_tissue)]
+            
+            elif self.config["data_mode"] == "rq3":
+                xyz=self.location_model[0].sample_with_guidance(
+                        adata.n_obs*2,
+                        self.location_model[1],
+                        conditional_z=new_tissue.obsm["aligned_spatial"].mean(0)[-1],
+                        guidance_scale=self.config["guidance_signal"]
+                    )
+                xyz=xyz[xyz[:,0]<new_tissue.obsm["aligned_spatial"].max(0)[0]]
+
 
 
             else:
@@ -74,7 +84,7 @@ class Inferernce:
                         adata.n_obs,
                         self.location_model[1],
                         conditional_z=new_tissue.obsm["aligned_spatial"].mean(0)[-1],
-                        guidance_scale=0.1
+                        guidance_scale=self.config["guidance_signal"]
                     )
             print(xyz)
             mask = np.all(np.isfinite(xyz), axis=1)
@@ -335,7 +345,7 @@ class Inferernce:
                 top_k=5,
                 verbose=False,
                 return_gt=False,
-                batch_size=128,
+                batch_size=4096,#128,
                 cheat_with_tokens=None,
                 cheat_with_expr=None,
             )
@@ -452,7 +462,7 @@ class Inferernce:
         plt.figure(figsize=(10,10))
         plt.scatter(real_data.obsm["aligned_spatial"][:,0],
                     real_data.obsm["aligned_spatial"][:,1],
-                    c=rgb_real, s=400)
+                    c=rgb_real, s=0.1)
         plt.title("Real Data PCA Colors")
         plt.axis("equal")
         plt.savefig(f"{self.config['artifact_dir']}/real_data_pca.png", dpi=300)

@@ -12,11 +12,10 @@ class Evaluator:
         if self.config["data_mode"] in ["rq4"]:
             target_adata.obsm["aligned_spatial"] = target_adata.obsm["aligned_spatial"][:,1:]
             predicted_adata.obsm["spatial"] = predicted_adata.obsm["spatial"][:,1:]
+        
         else:
             target_adata.obsm["aligned_spatial"] = target_adata.obsm["aligned_spatial"][:,:2]
             predicted_adata.obsm["spatial"] = predicted_adata.obsm["spatial"][:,:2]
-        # target_adata.obsm["aligned_spatial"] = target_adata.obsm["aligned_spatial"][:,:2]
-        # predicted_adata.obsm["spatial"] = predicted_adata.obsm["spatial"][:,:2]
 
 
 
