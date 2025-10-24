@@ -1,6 +1,4 @@
 import sys
-sys.path.append("../..")
-sys.path.append("../../generative_transformer")
 from data_loader import SliceDataLoader
 
 

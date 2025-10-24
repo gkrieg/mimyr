@@ -5,7 +5,6 @@ from email import parser
 import sys
 import anndata as ad
 from diffusion_model import DDPMTrainer
-sys.path.append("generative_transformer")
 
 from celltype_model import CelltypeModel, SkeletonCelltypeModel
 from data_loader import SliceDataLoader

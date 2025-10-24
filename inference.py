@@ -1,62 +1,50 @@
+import copy
+import math
 import os
-import torch
-from torch.utils.data import DataLoader
-import anndata as ad
-from matplotlib.pyplot import rc_context
-from metrics import *
-from analysis import *
+import pickle as pkl
 import sys
+from collections import defaultdict
 
-sys.path.append("generative_transformer")
-import tqdm
-from sklearn.decomposition import PCA
+import numpy as np
+import pandas as pd
+import scanpy as sc
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import anndata as ad
-import numpy as np
-from scipy.spatial import cKDTree
-import tqdm
-import math
-from sklearn.neighbors import KernelDensity
-from scipy.special import gamma
-import scanpy as sc
-from scMulan import generate_prompt_for_cg
-
-from utils.hf_tokenizer import scMulanTokenizer
-
-from generative_transformer.scMulan import compute_global_bin_edges
-import scMulan
-import torch
-from model.model_kvcache import MulanConfig, scMulanModel_kv as scMulanModel
-from scMulan import scMulan, model_generate
-
 from anndata import AnnData
+from matplotlib.pyplot import rc_context
 from scipy.sparse import csr_matrix
-import pandas as pd
-from reference.GeneSymbolUniform.pyGSUni import GeneSymbolUniform
-import numpy as np
+from scipy.special import gamma
 from scipy.spatial import cKDTree
-import pandas as pd
-from anndata import AnnData
-import tqdm
-import pickle as pkl
-
-from sklearn.neighbors import NearestNeighbors
-import copy
-
-from analysis import assign_shared_colors, plot_spatial_with_palette
-
-# === PCA visualization ===
-from sklearn.preprocessing import MinMaxScaler
+import scipy.sparse as sp
 from sklearn.decomposition import PCA
+from sklearn.neighbors import KernelDensity, NearestNeighbors
+from sklearn.preprocessing import MinMaxScaler
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
+from metrics import *
+from analysis import *
+
+from generative_transformer.utils.hf_tokenizer import scMulanTokenizer
+from generative_transformer.scMulan import (
+    compute_global_bin_edges,
+    generate_prompt_for_cg,
+    scMulan,
+    model_generate,
+    model_inference,
+)
+import generative_transformer.scMulan as scMulan_module  # module handle if needed
+from generative_transformer.model.model_kvcache import (
+    MulanConfig,
+    scMulanModel_kv as scMulanModel,
+)
 
 class Inferernce:
     def __init__(self, location_model, subclass_model, slice_data_loader, config):
         self.slice_data_loader = slice_data_loader
-        self.slice_data_loader2 = copy.deepcopy(slice_data_loader)
-        self.slice_data_loader2.gene_exp_model.id_to_subclass = pkl.load(open("id_to_subclass.pkl","rb"))
+        # self.slice_data_loader2 = copy.deepcopy(slice_data_loader)
+        # self.slice_data_loader2.gene_exp_model.id_to_subclass = pkl.load(open("id_to_subclass.pkl","rb"))
         self.token_mapping_model = slice_data_loader.gene_exp_model
         self.location_model = location_model
         self.subclass_model = subclass_model
@@ -205,8 +193,6 @@ class Inferernce:
 
 
     def infer_expression(self, pred_data, real_data):
-        import numpy as np
-        import pandas as pd
 
         exp_type = self.config["expression_inference_type"]
 
@@ -218,7 +204,7 @@ class Inferernce:
             var = pd.DataFrame(index=real_data.var_names)
 
             # 4) re-create
-            return AnnData(X=rows, obs=obs, var=var, obsm=pred_data.obsm.copy())
+            return AnnData(X=rows, obs=obs, var=var, obsm=pred_data.obsm.copy()), None
 
         elif exp_type == "lookup":
             # 1) build and subsample ref_tissue as before…
@@ -242,7 +228,7 @@ class Inferernce:
             n_genes  = ref_exp.shape[1]
 
             # 3) index reference cells by type
-            from collections import defaultdict
+            
             ref_by_type = defaultdict(list)
             for i, ct in enumerate(ref_ct):
                 ref_by_type[ct].append(i)
@@ -276,7 +262,7 @@ class Inferernce:
                 obs=pred_data.obs.copy(),
                 var = pd.DataFrame(index=real_data.var_names),       # ← use the original var with correct length
                 obsm=pred_data.obsm.copy()
-            )
+            ), None
 
 
         elif exp_type == "model":
@@ -288,14 +274,9 @@ class Inferernce:
             #     return pred_data
 
 
-            from scMulan import model_generate
-            import pandas as pd
-            import scipy.sparse as sp
-            import numpy as np
-            import scanpy as sc
-            import torch
-
-            meta_info = torch.load(f'{self.slice_data_loader.metadata_dir}4hierarchy_metainfo_mouse.pt')
+            
+            meta_info_path = f'{self.slice_data_loader.metadata_dir}4hierarchy_metainfo_mouse_geneunion2.pt'
+            meta_info = torch.load(meta_info_path)
 
             # 1) preserve obs but add necessary technology metadata, etc.
             for name, default in zip(['organ', 'technology', 'species', 'disease_state'], ['brain','M550','mouse','healthy']):
@@ -306,27 +287,33 @@ class Inferernce:
             # Get higher hierarchy levels
 
             ##IMP TO USE THIS ONE HERE
-            pred_data.obs['readable_label'] = self.slice_data_loader2.gene_exp_model.get_label_from_token(pred_data.obs['token'].values)
+            pred_data.obs['readable_label'] = self.slice_data_loader.gene_exp_model.get_label_from_token(pred_data.obs['token'].values)
             hierarchy = pkl.load(open(f'{self.slice_data_loader.metadata_dir}hierarchy.pkl','rb'))
             for h in ['class', 'subclass','supertype','cluster']:
                 pred_data.obs[h] = 'na'
             for cell in pred_data.obs_names:
-                c, sc, st, cl = hierarchy[('cluster',pred_data.obs.loc[cell, 'readable_label'])]
+                try:
+                    c, sc, st, cl = hierarchy[('cluster',pred_data.obs.loc[cell, 'readable_label'])]
+                except:
+                    c, sc, st, cl = ('01 IT-ET Glut',	'006 L4/5 IT CTX Glut',	'0027 L4/5 IT CTX Glut_5',	'0097 L4/5 IT CTX Glut_5')
+                    print('skip', pred_data.obs.loc[cell, 'readable_label'])
                 for h, v in zip(['class', 'subclass','supertype','cluster'], [c, sc, st, cl]):
                     pred_data.obs.loc[cell, h] = v
             # Get binned x,y,z
-            coordfiles = [f'{self.slice_data_loader.metadata_dir}edges_x.pkl',
-                          f'{self.slice_data_loader.metadata_dir}edges_y.pkl',
-                          f'{self.slice_data_loader.metadata_dir}edges_z.pkl',
-                         ]
-            for coord, coordfile, i in zip(('x','y','z'),coordfiles, range(3)):
-                vals_full = pred_data.obsm[f'spatial'][:,i].astype(float)
-                edges = pkl.load(open(coordfile, 'rb'))
-                # edges   = coord_bins[f'{coord}{coord_suffix}']
-                bin_idxs = np.digitize(vals_full, edges, right=True)
-                pred_data.obs[f'<{coord}>'] = bin_idxs
+            # coordfiles = [f'{self.slice_data_loader.metadata_dir}edges_x.pkl',
+            #               f'{self.slice_data_loader.metadata_dir}edges_y.pkl',
+            #               f'{self.slice_data_loader.metadata_dir}edges_z.pkl',
+            #              ]
+            # for coord, coordfile, i in zip(('x','y','z'),coordfiles, range(3)):
+            #     vals_full = pred_data.obsm[f'spatial'][:,i].astype(float)
+            #     edges = pkl.load(open(coordfile, 'rb'))
+            #     # edges   = coord_bins[f'{coord}{coord_suffix}']
+            #     bin_idxs = np.digitize(vals_full, edges, right=True)
+            #     pred_data.obs[f'<{coord}>'] = bin_idxs
+            pred_data.obs['<x>'] = real_data.obs.loc[pred_data.obs_names,'<x>']
+            pred_data.obs['<y>'] = real_data.obs.loc[pred_data.obs_names,'<y>']
+            pred_data.obs['<z>'] = real_data.obs.loc[pred_data.obs_names,'<z>']
             obs = pred_data.obs.copy()
-            
 
             # 2) make a var DataFrame of length 550
             var = pd.DataFrame(index=real_data.var_names)
@@ -337,14 +324,14 @@ class Inferernce:
             # 4) re-create
             adata_sub = AnnData(X=X_sparse, obs=obs, var=var, obsm=pred_data.obsm.copy())
             ckp_path = self.config["expression_model_checkpoint"]#'/compute/oven-0-13/skrieger/mouse-mediummodelscrna/epoch110_model.pt'
-            scml = model_generate(ckp_path=ckp_path,
+            scml = model_inference(ckp_path=ckp_path,
                                 adata=adata_sub,
-                                meta_info=meta_info,
+                                meta_info_path=meta_info_path,
                                 use_kv_cache=True,
                                 )
             results = scml.generate_cell_genesis(
                 idx=range(len(pred_data.obs_names)),
-                max_new_tokens=200,
+                max_new_tokens=350,
                 top_k=5,
                 verbose=False,
                 return_gt=False,
@@ -362,8 +349,7 @@ class Inferernce:
 
             # 4) re-create
             adata = AnnData(X=rows, obs=obs, var=scml.adata.var, obsm=pred_data.obsm)
-            print(adata)
-            return adata
+            return adata, results
 
 
     # === ORCHESTRATOR ===
@@ -414,8 +400,8 @@ class Inferernce:
         # step 3: expression
         real_data.obsm["spatial"] = real_data.obsm["aligned_spatial"]
         assign_shared_colors([real_data,pred_data], color_key="token")
-        plot_spatial_with_palette(real_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"/home/apdeshpa/projects/tissue-generator/{self.config['artifact_dir']}/real_data_clusters.png")
-        plot_spatial_with_palette(pred_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"/home/apdeshpa/projects/tissue-generator/{self.config['artifact_dir']}/pred_data_clusters.png")
+        # plot_spatial_with_palette(real_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"/home/apdeshpa/projects/tissue-generator/{self.config['artifact_dir']}/real_data_clusters.png")
+        # plot_spatial_with_palette(pred_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"/home/apdeshpa/projects/tissue-generator/{self.config['artifact_dir']}/pred_data_clusters.png")
 
 
 
@@ -424,7 +410,7 @@ class Inferernce:
         elif "skip" in self.config["expression_inference_type"]:
             pred_data.X = real_data.X.copy()
         else:
-            pred_data = self.infer_expression(pred_data, real_data)
+            pred_data, res = self.infer_expression(pred_data, real_data)
 
         # do pca of X and create RGD colors for each cell and the plot pred and GT
 
@@ -482,4 +468,4 @@ class Inferernce:
 
 
 
-        return pred_data
+        return pred_data, res

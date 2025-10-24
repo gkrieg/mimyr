@@ -8,9 +8,15 @@ class Evaluator:
     def evaluate(self, predicted_adata, target_adata, sample=100):
         results = {}
 
-        ### Fatten the 3d to 2d
-        target_adata.obsm["aligned_spatial"] = target_adata.obsm["aligned_spatial"][:,:2]
-        predicted_adata.obsm["spatial"] = predicted_adata.obsm["spatial"][:,:2]
+        ### Flatten the 3d to 2d
+        if self.config["data_mode"] in ["rq4"]:
+            target_adata.obsm["aligned_spatial"] = target_adata.obsm["aligned_spatial"][:,1:]
+            predicted_adata.obsm["spatial"] = predicted_adata.obsm["spatial"][:,1:]
+        else:
+            target_adata.obsm["aligned_spatial"] = target_adata.obsm["aligned_spatial"][:,:2]
+            predicted_adata.obsm["spatial"] = predicted_adata.obsm["spatial"][:,:2]
+        # target_adata.obsm["aligned_spatial"] = target_adata.obsm["aligned_spatial"][:,:2]
+        # predicted_adata.obsm["spatial"] = predicted_adata.obsm["spatial"][:,:2]
 
 
 
