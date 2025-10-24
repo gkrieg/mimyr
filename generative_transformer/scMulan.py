@@ -1,20 +1,21 @@
-import torch
-import os
-import sys
-from .model.model import MulanConfig, scMulanModel
-from .model.model_kvcache import scMulanModel_kv
-import torch.nn.functional as F
-from .utils.hf_tokenizer import scMulanTokenizer
-import scipy.sparse
 import numpy as np
-from tqdm import tqdm
+import pandas as pd
+import scipy.sparse as sp
+import torch
+import torch.nn.functional as F
 from anndata import AnnData
 from typing import Optional, List, Tuple, Union
-import pandas as pd
-import io
-import multiprocessing
 from tqdm import tqdm
+import os
+import sys
+import io
 import time
+
+from .model.model import MulanConfig, scMulanModel
+from .model.model_kvcache import scMulanModel_kv
+from .utils.hf_tokenizer import scMulanTokenizer
+
+import multiprocessing
 multiprocessing.set_start_method('spawn',force=True)
 
 class scMulan:
@@ -91,7 +92,7 @@ class scMulan:
     #     return cell_expression_dict
 
     def get_gene_expression_dict(self, i, matrix):
-        if scipy.sparse.issparse(matrix):
+        if sp.issparse(matrix):
             row = matrix.getrow(i).toarray().ravel()
         else:
             row = matrix[i]
@@ -109,7 +110,7 @@ class scMulan:
     #     return cell_expression_dict
 
     def get_gene_expression_dict_with_0s(self, i, matrix):
-        if scipy.sparse.issparse(matrix):
+        if sp.issparse(matrix):
             row = matrix.getrow(i).toarray().ravel()
         else:
             row = matrix[i]
@@ -646,13 +647,13 @@ class scMulan:
 def model_inference(ckp_path: str,
                     adata: AnnData,
                     meta_info_path: str = os.path.join(os.path.dirname(__file__), 'utils', 'meta_info.pt'),
-                    kv_cache: Optional[bool] = False,
+                    use_kv_cache: Optional[bool] = False,
                     **kwargs,
                     ):
     
     ckp = torch.load(ckp_path, map_location='cpu')
     gptconf = MulanConfig(**ckp['model_args'])
-    if kv_cache:
+    if use_kv_cache:
         model = scMulanModel_kv(gptconf)
     else:
         model = scMulanModel(gptconf)
@@ -665,7 +666,8 @@ def model_inference(ckp_path: str,
     tokenizer = scMulanTokenizer(meta_info['token_set'])
     n_express_level = ckp['model_args']['expression_level']
 
-    scml = scMulan(model,adata,meta_info,tokenizer,n_express_level,**kwargs)
+    # scml = scMulan(model,adata,meta_info,tokenizer,n_express_level,**kwargs)
+    scml = scMulan(adata,meta_info,tokenizer,n_express_level,model=model,**kwargs)
 
     return scml
 
@@ -681,6 +683,7 @@ def model_generate(ckp_path: str,
     # ckp['model_args']['expression_level'] = 100
     gptconf = MulanConfig(**ckp['model_args'])
     gptconf.vocab_size = len(meta_info['token_set'])
+    print(adata)
     # bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],gptconf.expression_level)
     bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],n_express_level)
     gptconf.bin_edges = bin_edges
@@ -707,11 +710,11 @@ def model_generate(ckp_path: str,
 
 
 def fine_tuning(
-                    adata: AnnData,
-                    meta_info: dict,
-                    n_express_level: int = 10,
-                    **kwargs
-                    ):
+    adata: AnnData,
+    meta_info: dict,
+    n_express_level: int = 10,
+    **kwargs
+    ):
 
     tokenizer = scMulanTokenizer(meta_info['token_set'])
     bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],n_express_level)
@@ -851,7 +854,9 @@ def compute_global_bin_edges(
     adata2 = adata[:, mulan_gene_set]  # subsetted AnnData
 
     X = adata2.X
-    if scipy.sparse.issparse(X):
+    print(adata2)
+    print(X.sum())
+    if sp.issparse(X):
         vals = X.data  # only nonzero values
     else:
         vals = X.ravel()
@@ -867,62 +872,205 @@ def compute_global_bin_edges(
     edges = np.linspace(min_val, max_val, n_express_level + 1)
     return edges
 
+# def tokens_and_vals_to_expression_row(
+#     var_names: List[str],
+#     gene_tokens: List[str],
+#     gene_tokens_int: List[int],
+#     new_vals: List[float],
+#     return_series: bool = False
+# ) -> Union[np.ndarray, pd.Series]:
+#     """
+#     Build an expression‐vector aligned to var_names from
+#     a list of gene_tokens + real‐valued new_vals.
+    
+#     - Missing genes → 0
+#     - Duplicates → average over their values
+#     """
+
+#     # Convert gene_tokens to integers if they are strings
+#     # gene_tokens_int = [int(tok) for tok in gene_tokens]
+    
+#     cut_idx = None
+#     seen_below_200 = False
+    
+#     for i in range(1, len(gene_tokens_int)):
+#         curr_tok = gene_tokens_int[i]
+#         prev_tok = gene_tokens_int[i - 1]
+    
+#         if curr_tok < 200:
+#             seen_below_200 = True
+    
+#         if seen_below_200:
+#             if curr_tok > prev_tok:
+#                 cut_idx = i
+#                 break
+    
+#     if cut_idx is not None:
+#         gene_tokens = gene_tokens[:cut_idx]
+#         new_vals = new_vals[:cut_idx]
+
+#     # if '0' in gene_tokens:
+#     #     stop_idx = gene_tokens.index('0')
+#     #     gene_tokens = gene_tokens[:stop_idx]
+#     #     new_vals = new_vals[:stop_idx]
+
+    
+        
+#     # 1) Aggregate values per gene
+#     agg = {}
+#     for g, v in zip(gene_tokens, new_vals):
+#         agg.setdefault(g, []).append(v)
+#     # 2) compute mean for each gene
+#     avg = {g: sum(vals) / len(vals) for g, vals in agg.items()}
+
+#     # 3) build the output row
+#     expr = np.zeros(len(var_names), dtype=float)
+#     for i, gene in enumerate(var_names):
+#         expr[i] = avg.get(gene, 0.0)
+
+#     if return_series:
+#         return pd.Series(expr, index=var_names)
+#     return expr
+
 def tokens_and_vals_to_expression_row(
     var_names: List[str],
     gene_tokens: List[str],
     gene_tokens_int: List[int],
     new_vals: List[float],
-    return_series: bool = False
+    return_series: bool = False,
+    *,
+    max_violations: int = 2,
+    allow_ties: bool = True,
+    enforce_range: bool = True,
+    token_min: int = 1,
+    token_max: int = 2001,
 ) -> Union[np.ndarray, pd.Series]:
     """
-    Build an expression‐vector aligned to var_names from
-    a list of gene_tokens + real‐valued new_vals.
-    
-    - Missing genes → 0
-    - Duplicates → average over their values
-    """
+    Convert Mimyr output (gene tokens + values) into an expression vector aligned to var_names.
 
-    # Convert gene_tokens to integers if they are strings
-    # gene_tokens_int = [int(tok) for tok in gene_tokens]
-    
-    cut_idx = None
-    seen_below_200 = False
-    
-    for i in range(1, len(gene_tokens_int)):
-        curr_tok = gene_tokens_int[i]
-        prev_tok = gene_tokens_int[i - 1]
-    
-        if curr_tok < 200:
-            seen_below_200 = True
-    
-        if seen_below_200:
-            if curr_tok > prev_tok:
+    Behavior
+    --------
+    - If <eos> (0) exists:
+        * Take the prefix before it.
+        * Trim only the minimal noisy TAIL so that there are at most `max_violations`
+          non-descending (i.e., rising) steps at the very end. Walk backward.
+        * Optionally drop out-of-range tail tokens first (1..2000) if enforce_range=True.
+    - If no <eos>:
+        * Scan FORWARD from the start and cut once cumulative violations exceed `max_violations`.
+          (No “under-200” logic; entirely removed.)
+    - Duplicates → averaged; Missing genes → 0.
+    """
+    n = min(len(gene_tokens), len(gene_tokens_int), len(new_vals))
+    if n == 0:
+        out = np.zeros(len(var_names), dtype=float)
+        return pd.Series(out, index=var_names) if return_series else out
+
+    gene_tokens = gene_tokens[:n]
+    gene_tokens_int = gene_tokens_int[:n]
+    new_vals = new_vals[:n]
+
+    def _is_in_range(tok: int) -> bool:
+        return (token_min <= tok <= token_max) if enforce_range else True
+
+    def _trim_tail_with_patience(prefix_int: List[int]) -> int:
+        """
+        Backward trim: allow up to `max_violations` rising steps at the very end.
+        Also drop out-of-range TAIL tokens first if enforce_range.
+        Returns cut index k (keep prefix_int[:k]).
+        """
+        if not prefix_int:
+            return 0
+
+        cut = len(prefix_int)
+
+        # Drop out-of-range tail tokens first
+        if enforce_range:
+            i = cut - 1
+            while i >= 0 and not _is_in_range(prefix_int[i]):
+                cut = i
+                i -= 1
+
+        # Walk backward; count rises at the end; cut when budget exceeded
+        violations = 0
+        i = cut - 1
+        while i > 0:
+            prev_tok = prefix_int[i - 1]
+            curr_tok = prefix_int[i]
+
+            if enforce_range and not _is_in_range(prev_tok):
+                cut = i
+                break
+
+            # Define violation: a rise (ties allowed if allow_ties=True)
+            if allow_ties:
+                increased = (curr_tok > prev_tok)
+            else:
+                increased = (curr_tok >= prev_tok)
+
+            if increased:
+                violations += 1
+                if violations > max_violations:
+                    cut = i
+                    break
+            i -= 1
+
+        return max(0, cut)
+
+    if 0 in gene_tokens_int:
+        # Case A: <eos> present → tail patience trim on prefix
+        eos_idx = gene_tokens_int.index(0)
+        prefix_tokens = gene_tokens[:eos_idx]
+        prefix_int = gene_tokens_int[:eos_idx]
+        prefix_vals = new_vals[:eos_idx]
+
+        good_len = _trim_tail_with_patience(prefix_int)
+        gene_tokens = prefix_tokens[:good_len]
+        new_vals = prefix_vals[:good_len]
+
+    else:
+        # Case B: no <eos> → forward scan; cut when violations exceed budget
+        cut_idx = len(gene_tokens_int)
+        violations = 0
+        for i in range(1, len(gene_tokens_int)):
+            prev_tok = gene_tokens_int[i - 1]
+            curr_tok = gene_tokens_int[i]
+
+            # Optionally treat out-of-range as immediate cut
+            if enforce_range and (not _is_in_range(curr_tok) or not _is_in_range(prev_tok)):
                 cut_idx = i
                 break
-    
-    if cut_idx is not None:
+
+            # Violation definition (rise)
+            if allow_ties:
+                increased = (curr_tok > prev_tok)
+            else:
+                increased = (curr_tok >= prev_tok)
+
+            if increased:
+                violations += 1
+                if violations > max_violations:
+                    cut_idx = i
+                    break
+
         gene_tokens = gene_tokens[:cut_idx]
         new_vals = new_vals[:cut_idx]
 
-    # if '0' in gene_tokens:
-    #     stop_idx = gene_tokens.index('0')
-    #     gene_tokens = gene_tokens[:stop_idx]
-    #     new_vals = new_vals[:stop_idx]
+    # Nothing left? return zeros
+    if len(gene_tokens) == 0:
+        expr = np.zeros(len(var_names), dtype=float)
+        return pd.Series(expr, index=var_names) if return_series else expr
 
-    
-        
-    # 1) Aggregate values per gene
+    # Aggregate duplicates by mean
     agg = {}
     for g, v in zip(gene_tokens, new_vals):
-        agg.setdefault(g, []).append(v)
-    # 2) compute mean for each gene
-    avg = {g: sum(vals) / len(vals) for g, vals in agg.items()}
+        if g is None:
+            continue
+        agg.setdefault(g, []).append(float(v))
+    avg = {g: (sum(vals) / len(vals)) for g, vals in agg.items()}
 
-    # 3) build the output row
+    # Build output aligned to var_names
     expr = np.zeros(len(var_names), dtype=float)
     for i, gene in enumerate(var_names):
         expr[i] = avg.get(gene, 0.0)
 
-    if return_series:
-        return pd.Series(expr, index=var_names)
-    return expr
+    return pd.Series(expr, index=var_names) if return_series else expr

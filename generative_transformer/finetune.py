@@ -22,8 +22,6 @@ import scipy.sparse as sp
 import pandas as pd
 from anndata import AnnData
 
-root_path = os.path.abspath('/work/magroup/skrieger/scMulan/Tutorials/scMulan')
-sys.path.append(os.path.abspath(root_path))
 
 from model.model import MulanConfig, scMulanModel
 from utils.hf_tokenizer import scMulanTokenizer

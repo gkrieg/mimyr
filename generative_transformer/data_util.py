@@ -1,8 +1,8 @@
 from anndata import AnnData
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler, SubsetRandomSampler
-from utils.hf_tokenizer import scMulanTokenizer
-from scMulan import scMulan, fine_tuning, generate_prompt_for_cg
+from .utils.hf_tokenizer import scMulanTokenizer
+from .scMulan import scMulan, fine_tuning, generate_prompt_for_cg
 import inspect
 from typing import Tuple, List, Optional
 import pickle as pkl
@@ -457,7 +457,12 @@ def get_generation_dataloader(
 
 def harmonize_dataset(adata, meta_info, coordfiles, organ='Brain', technology='M550', coord_suffix='_ccf', n_bins=100):
     if adata.X.max() > 10:
-        sc.pp.normalize_total(adata, target_sum=1e4) 
+        # base_per_gene = 5  # tune (e.g., 5–50)
+        # n_panel_genes = adata.shape[1]  # after your consistent filtering
+        # panel_target = base_per_gene * n_panel_genes
+        
+        # sc.pp.normalize_total(adata, target_sum=panel_target)
+        # sc.pp.normalize_total(adata, target_sum=1e4) 
         sc.pp.log1p(adata)
     sc.pp.filter_cells(adata,min_genes=10)
     coord_bins = {}
