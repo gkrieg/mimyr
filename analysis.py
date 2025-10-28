@@ -486,8 +486,12 @@ def plot_spatial_with_palette(
     scale_factor=1, 
     show_legend=False, 
     figsize=(10, 10), 
-    save=None
+    save=None,
+    saggital=False
 ):
+    adata= adata.copy()
+    if saggital:
+        adata.obsm["spatial"][:, [0, 1]] = adata.obsm["spatial"][:, [1, 2]]
     with plt.rc_context({"figure.figsize": figsize}):
         sc.pl.spatial(
             adata,

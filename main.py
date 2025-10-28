@@ -87,7 +87,7 @@ def get_args():
                         help="Training epochs for CelltypeModel")
     parser.add_argument("--learning_rate", type=float, default=0.001,
                         help="Learning rate for CelltypeModel")
-    parser.add_argument("--guidance_signal", type=float, default=0.01,
+    parser.add_argument("--guidance_signal", type=float, default=0.03,
                         help="Guidance signal for classifier-based guidance")
 
     parser.add_argument("--batch_size", type=int, default=1024,
@@ -101,7 +101,7 @@ def get_args():
         help="Comma-separated list of metrics to compute (soft_accuracy,soft_correlation,neighborhood_enrichment,soft_precision)",
         default=["soft_f1","soft_correlation"]#,"soft_accuracy", "soft_correlation", "neighborhood_enrichment", "soft_precision"],
     )
-    parser.add_argument("--metric_sampling", type=int, default=1, 
+    parser.add_argument("--metric_sampling", type=int, default=100, 
                         help="Percentage of samples to use for metric computation")
     parser.add_argument("--out_csv", type=str,
                         default="results/debugging_rq3_spencer.csv",
@@ -187,7 +187,15 @@ def main():
 
         closest_ref_slice = np.argmin([np.square(ref_slice.obsm["aligned_spatial"].mean(0)[-1] - slice_data_loader.test_slices[0].obsm["aligned_spatial"].mean(0)[-1]) for ref_slice in slice_data_loader.reference_slices])    
         best_ref_slice = slice_data_loader.reference_slices[closest_ref_slice].copy()
-        best_ref_slice.obsm["aligned_spatial"][:,-1] = slice_data_loader.test_slices[0].obsm["aligned_spatial"][:,-1].mean(0)
+        if args.data_mode == "rq4":
+            best_ref_slice.obsm["aligned_spatial"][:,0] = slice_data_loader.test_slices[0].obsm["aligned_spatial"][:,0].mean(0)
+        else:
+            best_ref_slice.obsm["aligned_spatial"][:,-1] = slice_data_loader.test_slices[0].obsm["aligned_spatial"][:,-1].mean(0)
+
+        import matplotlib.pyplot as plt
+        # plt.scatter(best_ref_slice.obsm["aligned_spatial"][:,2], best_ref_slice.obsm["aligned_spatial"][:,1], s=1)
+        # plt.savefig("debug.png")
+        # exit()
         location_model = BiologicalModel2([best_ref_slice],bandwidth=args.kde_bandwidth)
         location_model.fit()
 
@@ -211,6 +219,7 @@ def main():
 
         inf = Inferernce((trainer, location_model), celltype_model, slice_data_loader, copy.deepcopy(cfg))
         pred = inf.run_inference(slice_data_loader.test_slices)
+        print("Sending pred to evaluator...",pred)
         res = Evaluator(cfg).evaluate(pred, slice_data_loader.test_slices[0], sample=args.metric_sampling)
         res = {k: float(v) for k, v in res.items()}
 

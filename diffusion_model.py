@@ -426,6 +426,7 @@ class DDPMTrainer:
         guidance_scale: float = 1.0,
         use_ema: bool = True,
         conditional_z=None,
+        conditional_x=None,
     ) -> np.ndarray:
         """
         Classifier/potential guidance sampling.
@@ -435,6 +436,8 @@ class DDPMTrainer:
         print("USing std and mean",self.std,self.mean)
         if conditional_z is not None:
             conditional_z = (conditional_z - self.mean[0,2]) / self.std[0,2]
+        if conditional_x is not None:
+            conditional_x = (conditional_x - self.mean[0,0]) / self.std[0,0]
 
         # restore model with EMA if needed
         model = NoisePredictor(
@@ -468,6 +471,9 @@ class DDPMTrainer:
             if conditional_z is not None:
                 eps = torch.randn(n_samples, device=self.device)
                 x[:, 2] = torch.sqrt(alpha_bar_t) * conditional_z + sqrt_one_minus_alpha_bar * eps
+            if conditional_x is not None:
+                eps = torch.randn(n_samples, device=self.device)
+                x[:, 0] = torch.sqrt(alpha_bar_t) * conditional_x + sqrt_one_minus_alpha_bar * eps
 
 
             # base prediction
@@ -496,6 +502,9 @@ class DDPMTrainer:
             # re-enforce condition on z-dimension
             if conditional_z is not None:
                 x[:, 2] = conditional_z
+
+            if conditional_x is not None:
+                x[:, 0] = conditional_x
 
         x_np = x.detach().cpu().numpy() * self.std + self.mean
         return x_np

@@ -77,6 +77,14 @@ class Inferernce:
                     )
                 xyz=xyz[xyz[:,0]<new_tissue.obsm["aligned_spatial"].max(0)[0]]
 
+            elif self.config["data_mode"] == "rq4":
+                xyz=self.location_model[0].sample_with_guidance(
+                        adata.n_obs,
+                        self.location_model[1],
+                        conditional_x=new_tissue.obsm["aligned_spatial"].mean(0)[0],
+                        guidance_scale=self.config["guidance_signal"]
+                    )
+
 
 
             else:
@@ -285,7 +293,7 @@ class Inferernce:
 
 
             
-            meta_info_path = f'{self.slice_data_loader.metadata_dir}4hierarchy_metainfo_mouse_geneunion2.pt'
+            meta_info_path = f'{self.slice_data_loader.metadata_dir}4hierarchy_metainfo_mouse_geneunion2_DAG.pt'
             meta_info = torch.load(meta_info_path)
 
             # 1) preserve obs but add necessary technology metadata, etc.
@@ -320,9 +328,17 @@ class Inferernce:
             #     # edges   = coord_bins[f'{coord}{coord_suffix}']
             #     bin_idxs = np.digitize(vals_full, edges, right=True)
             #     pred_data.obs[f'<{coord}>'] = bin_idxs
-            pred_data.obs['<x>'] = real_data.obs.loc[pred_data.obs_names,'<x>']
-            pred_data.obs['<y>'] = real_data.obs.loc[pred_data.obs_names,'<y>']
-            pred_data.obs['<z>'] = real_data.obs.loc[pred_data.obs_names,'<z>']
+            # pred_data.obs['<x>'] = real_data.obs.loc[pred_data.obs_names,'<x>']
+            # pred_data.obs['<y>'] = real_data.obs.loc[pred_data.obs_names,'<y>']
+            # pred_data.obs['<z>'] = real_data.obs.loc[pred_data.obs_names,'<z>']
+
+            ## USE PRED DATA HERE
+            pred_data.obs['<x>'] = pred_data.obsm['spatial'][:,2]
+            pred_data.obs['<y>'] = pred_data.obsm['spatial'][:,1]
+            pred_data.obs['<z>'] = pred_data.obsm['spatial'][:,0]
+
+
+
             obs = pred_data.obs.copy()
 
             # 2) make a var DataFrame of length 550
@@ -379,7 +395,7 @@ class Inferernce:
 
         plt.figure()
 
-        plt.scatter(pred_data.obsm["spatial"][:,0], pred_data.obsm["spatial"][:,1], s=0.1, alpha=0.5)
+        plt.scatter(pred_data.obsm["spatial"][:,(2 if self.config["data_mode"] == "rq4" else 0)], pred_data.obsm["spatial"][:,1], s=0.1, alpha=0.5)
         plt.xlim(0,12)
         plt.ylim(0,8)
         plt.title("Inferred Locations model")
@@ -388,7 +404,7 @@ class Inferernce:
         plt.figure()
 
         # Ground truth
-        plt.scatter(real_data.obsm["aligned_spatial"][:,0], real_data.obsm["aligned_spatial"][:,1], s=0.1, alpha=0.5)
+        plt.scatter(real_data.obsm["aligned_spatial"][:,(2 if self.config["data_mode"] == "rq4" else 0)], real_data.obsm["aligned_spatial"][:,1], s=0.1, alpha=0.5)
         plt.xlim(0,12)
         plt.ylim(0,8)
         plt.title("Ground Truth Locations")
@@ -410,8 +426,8 @@ class Inferernce:
         # step 3: expression
         real_data.obsm["spatial"] = real_data.obsm["aligned_spatial"]
         assign_shared_colors([real_data,pred_data], color_key="token")
-        # plot_spatial_with_palette(real_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"/home/apdeshpa/projects/tissue-generator/{self.config['artifact_dir']}/real_data_clusters.png")
-        # plot_spatial_with_palette(pred_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"/home/apdeshpa/projects/tissue-generator/{self.config['artifact_dir']}/pred_data_clusters.png")
+        plot_spatial_with_palette(real_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"/home/apdeshpa/projects/tissue-generator/{self.config['artifact_dir']}/real_data_clusters.png", saggital="rq4" in self.config["data_mode"])
+        plot_spatial_with_palette(pred_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"/home/apdeshpa/projects/tissue-generator/{self.config['artifact_dir']}/pred_data_clusters.png", saggital="rq4" in self.config["data_mode"])
 
 
 
@@ -460,7 +476,7 @@ class Inferernce:
 
         # plot real
         plt.figure(figsize=(10,10))
-        plt.scatter(real_data.obsm["aligned_spatial"][:,0],
+        plt.scatter(real_data.obsm["aligned_spatial"][:,(2 if self.config["data_mode"] == "rq4" else 0)],
                     real_data.obsm["aligned_spatial"][:,1],
                     c=rgb_real, s=0.1)
         plt.title("Real Data PCA Colors")
@@ -469,7 +485,7 @@ class Inferernce:
 
         # plot pred
         plt.figure(figsize=(10,10))
-        plt.scatter(pred_data.obsm["spatial"][:,0],
+        plt.scatter(pred_data.obsm["spatial"][:,(2 if self.config["data_mode"] == "rq4" else 0)],
                     pred_data.obsm["spatial"][:,1],
                     c=rgb_pred, s=400)
         plt.title("Pred Data PCA Colors")
@@ -477,5 +493,4 @@ class Inferernce:
         plt.savefig(f"{self.config['artifact_dir']}/pred_data_pca.png", dpi=300)
 
 
-
-        return pred_data, res
+        return pred_data
