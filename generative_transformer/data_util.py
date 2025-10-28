@@ -1,8 +1,8 @@
 from anndata import AnnData
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler, SubsetRandomSampler
-from .utils.hf_tokenizer import scMulanTokenizer
-from .scMulan import scMulan, fine_tuning, generate_prompt_for_cg
+from utils.hf_tokenizer import scMulanTokenizer
+from scMulan import scMulan, fine_tuning, generate_prompt_for_cg
 import inspect
 from typing import Tuple, List, Optional
 import pickle as pkl
@@ -303,6 +303,7 @@ def get_generation_dataloader(
     sampling_col: str = "sampling_prob",
     epoch_samples: Optional[int] = 1000000,        # how many rows per epoch; default = len(ds)
     seed: int = 0,                               # base seed for draws
+    bin_edges = None,
 ) -> DataLoader:
     """
     Build a DataLoader for conditional-generation that can sample cells
@@ -315,8 +316,10 @@ def get_generation_dataloader(
     tokenizer.pad_token = '<SPToken10>'
 
     # 2) SCM preproc (unchanged)
-    scm = fine_tuning(adata, meta_info, n_express_level=n_express_level)
+    scm = fine_tuning(adata, meta_info, n_express_level=n_express_level, bin_edges=bin_edges)
     scm.data_preprocess()
+
+    bin_edges = scm.bin_edges
 
     # 3) dataset (unchanged)
     ds = _AnndataGenDataset(
@@ -382,7 +385,7 @@ def get_generation_dataloader(
         drop_last=False,
         persistent_workers=(num_workers > 0),
         generator=torch.Generator().manual_seed(seed)  # deterministic collation order
-    )
+    ), bin_edges
 
 
 # def get_generation_dataloader(
@@ -465,17 +468,20 @@ def harmonize_dataset(adata, meta_info, coordfiles, organ='Brain', technology='M
         # sc.pp.normalize_total(adata, target_sum=1e4) 
         sc.pp.log1p(adata)
     sc.pp.filter_cells(adata,min_genes=10)
-    coord_bins = {}
-    for coord, coordfile in zip(('x','y','z'),coordfiles):
-        vals_full = adata.obs[f'{coord}{coord_suffix}'].values.astype(float)
-        vals = adata.obs[f'{coord}{coord_suffix}'].dropna().values.astype(float)
-        coord_bins[f'{coord}{coord_suffix}'] = np.linspace(vals.min(), vals.max(), n_bins)
-        edges = pkl.load(open(coordfile, 'rb'))
-        # edges   = coord_bins[f'{coord}{coord_suffix}']
-        bin_idxs = np.digitize(vals_full, edges, right=True)
-        adata.obs[f'<{coord}>'] = bin_idxs
-    adata.obs['organ'] = organ
-    adata.obs['technology'] = technology
+    if '<x>' not in adata.obs.columns:
+        coord_bins = {}
+        for coord, coordfile in zip(('x','y','z'),coordfiles):
+            vals_full = adata.obs[f'{coord}{coord_suffix}'].values.astype(float)
+            vals = adata.obs[f'{coord}{coord_suffix}'].dropna().values.astype(float)
+            coord_bins[f'{coord}{coord_suffix}'] = np.linspace(vals.min(), vals.max(), n_bins)
+            edges = pkl.load(open(coordfile, 'rb'))
+            # edges   = coord_bins[f'{coord}{coord_suffix}']
+            bin_idxs = np.digitize(vals_full, edges, right=True)
+            adata.obs[f'<{coord}>'] = bin_idxs
+    if 'organ' not in adata.obs.columns:
+        adata.obs['organ'] = organ
+    if 'technology' not in adata.obs.columns:
+        adata.obs['technology'] = technology
     cols = ['<x>','<y>','<z>','organ', 'class', 'subclass','supertype','cluster', 'technology']
     mask = adata.obs[cols].notnull().all(axis=1)
     adata = adata[mask].copy()

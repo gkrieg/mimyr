@@ -22,6 +22,8 @@ import scipy.sparse as sp
 import pandas as pd
 from anndata import AnnData
 
+root_path = os.path.abspath('/work/magroup/skrieger/scMulan/Tutorials/scMulan')
+sys.path.append(os.path.abspath(root_path))
 
 from model.model import MulanConfig, scMulanModel
 from utils.hf_tokenizer import scMulanTokenizer
@@ -68,7 +70,9 @@ def evaluate_expression_correlation(
     tokenizer,
     tokens_and_vals_to_expression_row_fn,
     var_names,
-    mask_token_id=-100
+    labels,
+    mask_token_id=-100,
+    threshold=0.0,
 ):
     """
     Compute per-cell Pearson correlation between predicted and true expression.
@@ -100,6 +104,10 @@ def evaluate_expression_correlation(
     B, T, V = logits_labels.shape
     logits_cls = logits_labels.argmax(dim=-1).cpu().numpy()           # (B, T)
     expr_vals = logits_exp_real.squeeze(-1).cpu().numpy()             # (B, T)
+    if hasattr(labels, "detach"):
+        labels_np = labels.detach().cpu().numpy()
+    else:
+        labels_np = np.asarray(labels)
     idxs = batch['idx'] if 'idx' in batch else range(B)               # indices into adata
 
     predicted_expr_rows = []
@@ -108,14 +116,25 @@ def evaluate_expression_correlation(
     for b in range(B):
         gene_token_ids = logits_cls[b]
         expr_values = expr_vals[b]
+        labels_b = labels_np[b]      # (T,)
         
         # Filter out special tokens (mask, EOS, etc.)
-        valid_mask = (gene_token_ids != mask_token_id)
+        valid_mask = (labels_b != mask_token_id)
         gene_token_ids = gene_token_ids[valid_mask]
         expr_values = expr_values[valid_mask]
 
         # Convert token IDs to strings
         gene_tokens = tokenizer.convert_ids_to_tokens(gene_token_ids.tolist())
+        # if b == 0:
+        #     print('labels')
+        #     print(labels_b)
+        #     print(valid_mask)
+        #     print('gene token ids')
+        #     print(gene_token_ids)
+        #     print('gene tokens')
+        #     print(gene_tokens)
+        #     print('expression values:')
+        #     print(expr_values)
 
         # Construct predicted expression row
         pred_expr = tokens_and_vals_to_expression_row_fn(
@@ -125,6 +144,12 @@ def evaluate_expression_correlation(
             new_vals=expr_values.tolist(),
             return_series=False
         )
+        # if b == 0:
+        #     print('pred_expr')
+        #     print(pred_expr)
+        #     for v, p in zip(var_names,pred_expr):
+        #         if p > 0:
+        #             print(f'{v}: {p}')
         predicted_expr_rows.append(pred_expr)
 
         # Get true expression from AnnData (dense or sparse)
@@ -141,6 +166,148 @@ def evaluate_expression_correlation(
         pearson_rs.append(r)
 
     return pearson_rs
+
+
+def evaluate_expression_metrics(
+    adata,
+    batch,
+    logits_labels,            # (B, T, V) torch.Tensor
+    logits_exp_real,          # (B, T, 1) torch.Tensor
+    tokenizer,
+    tokens_and_vals_to_expression_row_fn,
+    var_names,
+    labels,                   # (B, T) torch.Tensor or np.ndarray; ignore positions == mask_token_id
+    mask_token_id=-100,
+    threshold=0.0,            # expression > threshold => positive
+    verbose=False,
+):
+    """
+    Returns per-cell metrics: Pearson r, F1, precision, recall.
+    """
+    import numpy as np
+    from scipy.stats import pearsonr
+
+    gene_sums = np.asarray(adata.X.sum(axis=0)).ravel()
+
+    # Align sums to provided var_names (in case orders differ)
+    # Fast path if identical:
+    if list(getattr(adata, "var_names", [])) == list(var_names):
+        valid_gene_mask = gene_sums > 0
+    else:
+        # Map adata.var_names -> index
+        name_to_idx = {g: i for i, g in enumerate(list(adata.var_names))}
+        valid_gene_mask = np.array(
+            [(gene_sums[name_to_idx[g]] > 0) if g in name_to_idx else False for g in var_names],
+            dtype=bool
+        )
+
+    B, T, V = logits_labels.shape
+    logits_cls = logits_labels.argmax(dim=-1).detach().cpu().numpy()     # (B, T)
+    expr_vals  = logits_exp_real.squeeze(-1).detach().cpu().numpy()      # (B, T)
+
+    if hasattr(labels, "detach"):
+        labels_np = labels.detach().cpu().numpy()
+    else:
+        labels_np = np.asarray(labels)
+
+    idxs = batch.get('idx', range(B))
+
+    pearson_rs, f1s, precisions, recalls = [], [], [], []
+    for b in range(B):
+        ids  = logits_cls[b]
+        vals = expr_vals[b]
+        lab  = labels_np[b]
+
+        # Keep only positions we trained on (mask out prompt/pad/etc.)
+        keep = (lab != mask_token_id)
+        if not np.any(keep):
+            # No usable tokens -> zero-vector prediction
+            pred_expr = np.zeros(len(var_names), dtype=float)
+        else:
+            ids  = ids[keep]
+            vals = vals[keep]
+            tokens = tokenizer.convert_ids_to_tokens(ids.tolist())
+            pred_expr = tokens_and_vals_to_expression_row_fn(
+                var_names=var_names,
+                gene_tokens=tokens,
+                gene_tokens_int=ids.tolist(),
+                new_vals=vals.tolist(),
+                return_series=False,
+                max_violations= 10,
+            )
+
+        # Ground truth
+        gt = adata.X[idxs[b]]
+        gt = gt.toarray().ravel() if hasattr(gt, "toarray") else np.asarray(gt).ravel()
+
+        pred_expr = pred_expr[valid_gene_mask]
+        gt        = gt[valid_gene_mask]
+        valid_genes = np.array(var_names)[valid_gene_mask]
+
+        # Pearson r
+        if np.std(pred_expr) > 0 and np.std(gt) > 0:
+            r, _ = pearsonr(pred_expr, gt)
+        else:
+            r = 0.0
+        pearson_rs.append(float(r))
+
+        # F1 / Precision / Recall (binary by threshold)
+        pred_pos = (pred_expr > threshold)
+        gt_pos   = (gt        > threshold)
+
+        tp = int(np.count_nonzero(pred_pos & gt_pos))
+        pp = int(np.count_nonzero(pred_pos))
+        gp = int(np.count_nonzero(gt_pos))
+
+        prec = tp / pp if pp > 0 else 0.0
+        rec  = tp / gp if gp > 0 else 0.0
+        f1   = (2*prec*rec)/(prec+rec) if (prec+rec) > 0 else 0.0
+
+        precisions.append(float(prec))
+        recalls.append(float(rec))
+        f1s.append(float(f1))
+        if b == 0 and verbose == True:
+            print("\n================ DEBUG: Cell 0 ================")
+            print('labels')
+            print(lab)
+            print('gene token ids')
+            print(ids)
+            print('gene tokens')
+            print(tokens)
+            print('expression values:')
+            print(vals)
+            print('pred_expr')
+            print(pred_expr)
+            # for v, p in zip(var_names[valid_gene_mask],pred_expr):
+            #     if p > 0:
+            #         print(f'{v}: {p}')
+            
+            gt_expressed_idx = np.where(gt > 0)[0]
+            print(f"Ground-truth expressed genes: {len(gt_expressed_idx)} / {len(valid_genes)}")
+
+            for i in gt_expressed_idx:
+                gene = valid_genes[i]
+                gt_val = gt[i]
+                pred_val = pred_expr[i]
+                
+                present_in_pred = gene in tokens
+                pred_idx = tokens.index(gene) if gene in tokens else -1
+                pred_val_raw = vals[pred_idx] if pred_idx != -1 else 0.0
+                flag = "✅" if present_in_pred else "❌"
+                print(f"{flag} {gene:15s} | GT={gt_val:.3f} | Pred={pred_val:.3f} | Pred2={pred_val_raw:.3f}")
+
+            # Genes predicted >0 but GT==0
+            false_pos_idx = np.where((gt == 0) & (pred_expr > 0))[0]
+            false_pos_genes = valid_genes[false_pos_idx]
+            if len(false_pos_genes) > 0:
+                print("\nPredicted >0 but GT=0 (false positives):")
+                print(", ".join(false_pos_genes.tolist()))
+            else:
+                print("\nNo false positives detected.")
+            print("================================================\n")
+
+    return pearson_rs, f1s, precisions, recalls
+
 
 def rebalance_sampling_mass(
     adata_train,
@@ -272,6 +439,8 @@ def main():
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--log-per-steps', type=int, default=100,
                         help='Logging to WANDB only after this many steps')
+    parser.add_argument('--bin-edges-file', type=str, default=None,
+                       help='bin_edges file for gene expression binning')
 
     args = parser.parse_args()
     
@@ -290,8 +459,6 @@ def main():
     else:
         rank = 0
         device = torch.device(args.device)
-
-
 
     # 1) Load pretrained checkpoint
     if args.ckp_path is not None:
@@ -368,10 +535,8 @@ def main():
             model.config.expression_level = args.new_expression_size
             ckp['model_args']['expression_level'] = args.new_expression_size
     
-    
     print('initialized model', flush=True)
-    # for name, param in model.named_parameters():
-    #     print(name, param.shape)
+
     # 4) Load AnnData ONCE
 
     def _set_uniform_sampling_prob(adata_like, col='sampling_prob'):
@@ -380,7 +545,9 @@ def main():
         adata_like.obs[col] = np.full(adata_like.n_obs, 1.0, dtype=np.float64)  # loader will renormalize
 
     adata = sc.read_h5ad(args.adata)
-    load_sampling_metadata_csv(adata, 'train_adata_sampling.csv.gz', overwrite=True)
+    args.use_sampling_probs = not args.disable_sampling_probs
+    if args.use_sampling_probs:
+        load_sampling_metadata_csv(adata, 'train_adata_sampling.csv.gz', overwrite=True)
     
     if args.harmonize_dataset:
         coord_files = [f'{args.metadata_dir}edges_x.pkl', f'{args.metadata_dir}edges_y.pkl', f'{args.metadata_dir}edges_z.pkl']
@@ -394,28 +561,6 @@ def main():
     if args.dummy:
         adata._inplace_subset_obs(adata.obs_names[:100])
         print('using only first 100 cells')
-    
-    # Add genes for new gene set 
-    existing_genes = adata.var_names.tolist()
-    gene_set = list(set(list(meta_info['gene_set'])))
-    new_genes = [g for g in gene_set if g not in existing_genes]
-    print(f"Adding {len(new_genes)} new genes to adata")
-    
-    if len(new_genes) > 0:
-        n_obs = adata.n_obs
-        n_new_vars = len(new_genes)
-        new_vars = pd.DataFrame(index=new_genes)
-        new_var = pd.concat([adata.var, new_vars], axis=0)
-    
-        if sp.issparse(adata.X):
-            new_data = sp.csr_matrix((n_obs, n_new_vars))
-            X = sp.hstack([adata.X, new_data], format='csr')
-        else:
-            new_data = np.zeros((n_obs, n_new_vars))
-            X = np.hstack([adata.X, new_data])
-    
-        adata = sc.AnnData(X=X, var=new_var, obs=adata.obs, obsm=adata.obsm, uns=adata.uns)
-        adata.var_names_make_unique()
     
     # -----------------------------
     # NEW: version 1 — slice-based split if --val-slice-nums is provided
@@ -458,6 +603,7 @@ def main():
                 rng = np.random.default_rng(seed=getattr(args, "seed", None))
                 adata2 = sc.read_h5ad(args.adata2)
                 adata2.var_names_make_unique()
+                gene_set = meta_info['gene_set']
                 adata2._inplace_subset_var(gene_set)
                 if args.dummy:
                     adata2._inplace_subset_obs(adata2.obs_names[:100])
@@ -498,26 +644,7 @@ def main():
                 print(f"Requested: train={n_train_req}, val={n_val_req}; "
                       f"Allocated: train={n_train}, val={n_val} (total available={n_total})")
                 
-                _set_uniform_sampling_prob(adata2_train, col='sampling_prob')
-                
-                # n_val   = adata_val.n_obs
-                # n_train = adata_train.n_obs
-                # if n_train > adata2.n_obs:
-                #     raise ValueError(f"--adata2 has only {adata2.n_obs} cells, cannot split into "
-                #                      f"{n_train} train + {n_val} val.")
-        
-                # # sample validation cells first (no replacement), then training from remaining
-                # all_idx = np.arange(adata2.n_obs)
-                # #idx_val = rng.choice(all_idx, size=n_val, replace=False)
-                # #remain  = np.setdiff1d(all_idx, idx_val, assume_unique=False)
-                # idx_train = rng.choice(all_idx, size=n_train, replace=False)
-                # #adata2_val   = adata2[idx_val].copy()
-                # adata2._inplace_subset_obs(idx_train)
-                # adata2_train = adata2
-                # print(adata2_train)
-                # adata_train.obs_names_make_unique()
-                # adata2_train.obs_names_make_unique()
-                
+                _set_uniform_sampling_prob(adata2_train, col='sampling_prob')                
         
                 # Concatenate each split separately
                 adata_train = sc.concat(
@@ -536,11 +663,6 @@ def main():
                 train_path = os.path.join(args.output_dir, "train.h5ad")
                 if rank == 0:
                     adata_train.write(train_path)
-            #if n_val > 0:
-                #adata_val = adata_val.concatenate(
-                    #adata2_val, join='outer',
-                    #batch_key='dataset_type', batch_categories=['st', 'scrna']
-                #)
     
     # -----------------------------
     # version 2 — random split if --val-slice-nums is NOT provided
@@ -607,8 +729,13 @@ def main():
     # Optional: if you want to limit rows per epoch, pass args.epoch_samples if you have it
     epoch_samples = getattr(args, 'epoch_samples', None)
     base_seed     = getattr(args, 'seed', 0)
+
+    if args.bin_edges_file is not None:
+        bin_edges = torch.load(args.bin_edges_file)
+    else:
+        bin_edges = None
     
-    train_loader = get_generation_dataloader(
+    train_loader, bin_edges = get_generation_dataloader(
         adata       = adata_train,
         meta_info   = meta_info,
         batch_size  = args.batch_size,
@@ -623,10 +750,13 @@ def main():
         sampling_col       = args.sampling_col,
         epoch_samples      = epoch_samples,
         seed               = base_seed,
+        bin_edges          = bin_edges,
     )
+    if not args.bin_edges_file:
+        torch.save(bin_edges, f'{args.output_dir}bin_edges.pt')
     
     if adata_val is not None:
-        val_loader = get_generation_dataloader(
+        val_loader, _ = get_generation_dataloader(
             adata       = adata_val,
             meta_info   = meta_info,
             batch_size  = args.batch_size,
@@ -637,7 +767,8 @@ def main():
             include_0s  = False,
             # keep uniform sampling for validation
             use_sampling_probs = use_probs_val,
-            sampling_col       = args.sampling_col
+            sampling_col       = args.sampling_col,
+            bin_edges          = bin_edges,
         )
     else:
         val_loader = None
@@ -694,7 +825,8 @@ def main():
         
         model.train()
         total_loss, total_cls, total_exp_bin, total_exp_real = 0.0, 0.0, 0.0, 0.0
-
+        all_train_pearson_rs = []
+        all_train_f1, all_train_prec, all_train_rec = [], [], []
         for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch} [train]")):
             input_ids      = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
@@ -724,11 +856,36 @@ def main():
 
             if rank == 0:
                 if step % args.log_per_steps == 0:
+                    with torch.no_grad():
+                        pearson_rs_train, f1s, precs, recs = evaluate_expression_metrics(
+                            adata=adata_train,
+                            batch=batch,
+                            logits_labels=logits_cls.detach().cpu(),
+                            logits_exp_real=logits_exp_real.detach().cpu(),
+                            tokenizer=tokenizer,
+                            tokens_and_vals_to_expression_row_fn=tokens_and_vals_to_expression_row,
+                            var_names=adata_train.var_names.tolist(),
+                            labels=labels,            # tensor on device is fine; fn handles .detach().cpu()
+                            mask_token_id=-100,
+                        )
+                        mean_train_pearson_r = float(np.mean(pearson_rs_train)) if len(pearson_rs_train) else 0.0
+                        all_train_pearson_rs.extend(pearson_rs_train)
+                        mean_f1  = float(np.mean(f1s))  if f1s  else 0.0
+                        mean_prc = float(np.mean(precs)) if precs else 0.0
+                        mean_rec = float(np.mean(recs))  if recs  else 0.0
+                        all_train_f1.extend(f1s)
+                        all_train_prec.extend(precs)
+                        all_train_rec.extend(recs)
+                        
                     wandb.log({
                         "train/batch_loss":     loss.item(),
                         "train/batch_loss_cls": loss_cls.item(),
                         "train/batch_loss_exp_bin": loss_exp_bin.item(),
                         "train/batch_loss_exp_real": loss_exp_real.item(),
+                        "train/pearson_r":            mean_train_pearson_r,
+                        "train/f1":                      mean_f1,
+                        "train/precision":               mean_prc,
+                        "train/recall":                  mean_rec,
                         "train/step":           (epoch-1)*len(train_loader) + step,
                     })
 
@@ -738,12 +895,19 @@ def main():
         avg_exp_real  = total_exp_real  / len(train_loader)
         print(f"Epoch {epoch} — train total {avg_loss:.4f}, cls {avg_cls:.4f}, exp_bin {avg_exp_bin:.4f}, exp_real {avg_exp_real:.4f}")
         if rank == 0:
-            
+            mean_train_pearson_epoch = float(np.mean(all_train_pearson_rs)) if len(all_train_pearson_rs) else 0.0
+            mean_train_f1_epoch  = float(np.mean(all_train_f1))  if all_train_f1  else 0.0
+            mean_train_prc_epoch = float(np.mean(all_train_prec)) if all_train_prec else 0.0
+            mean_train_rec_epoch = float(np.mean(all_train_rec))  if all_train_rec  else 0.0
             wandb.log({
                 "train/epoch_loss":     avg_loss,
                 "train/epoch_loss_cls": avg_cls,
                 "train/epoch_loss_exp_bin": avg_exp_bin,
                 "train/epoch_loss_exp_real": avg_exp_real,
+                "train/pearson_r_epoch":        mean_train_pearson_epoch, 
+                "train/f1_epoch":               mean_train_f1_epoch,
+                "train/precision_epoch":        mean_train_prc_epoch,
+                "train/recall_epoch":           mean_train_rec_epoch,
                 "epoch":                epoch,
             })
 
@@ -752,6 +916,7 @@ def main():
             model.eval()
             v_loss, v_cls, v_exp_bin, v_exp_real, count = 0.0, 0.0, 0.0, 0.0, 0
             all_pearson_rs = []
+            all_val_f1, all_val_prec, all_val_rec = [], [], []
             with torch.no_grad():
                 for batch in tqdm(val_loader, desc=f"Epoch {epoch} [val]"):
                     input_ids      = batch['input_ids'].to(device)
@@ -776,7 +941,7 @@ def main():
                     v_exp_bin  += leb.item()
                     v_exp_real  += ler.item()
                     count  += 1
-                    pearson_rs = evaluate_expression_correlation(
+                    pearson_rs, f1s, precs, recs = evaluate_expression_metrics(
                         adata=adata_val,
                         batch=batch,
                         logits_labels=logits_labels.cpu(),
@@ -784,9 +949,14 @@ def main():
                         tokenizer=tokenizer,
                         tokens_and_vals_to_expression_row_fn=tokens_and_vals_to_expression_row,
                         var_names=adata_val.var_names.tolist(),
-                        mask_token_id=tokenizer.pad_token_id
+                        labels=labels,
+                        mask_token_id=-100,
                     )
                     all_pearson_rs.extend(pearson_rs)
+                    all_val_f1.extend(f1s)
+                    all_val_prec.extend(precs)
+                    all_val_rec.extend(recs)
+
 
             avg_v_loss = v_loss / count
             avg_v_cls  = v_cls  / count
@@ -795,6 +965,10 @@ def main():
             print(f"Epoch {epoch} — valid total {avg_v_loss:.4f}, cls {avg_v_cls:.4f}, exp {avg_v_exp_bin:.4f}")
             mean_pearson_r = np.mean(all_pearson_rs)
             print(f"Validation mean Pearson r: {mean_pearson_r:.4f}")
+            mean_val_f1  = float(np.mean(all_val_f1))  if all_val_f1  else 0.0
+            mean_val_prc = float(np.mean(all_val_prec)) if all_val_prec else 0.0
+            mean_val_rec = float(np.mean(all_val_rec))  if all_val_rec  else 0.0
+            print(f"Validation mean F1: {mean_val_f1:.4f} (P={mean_val_prc:.4f}, R={mean_val_rec:.4f})")
             if rank == 0:
                 wandb.log({
                     "valid/epoch_loss":     avg_v_loss,
@@ -802,6 +976,9 @@ def main():
                     "valid/epoch_loss_exp_bin": avg_v_exp_bin,
                     "valid/epoch_loss_exp_real": avg_v_exp_real,
                     "valid/pearson_r": mean_pearson_r,
+                    "valid/f1":                     mean_val_f1,
+                    "valid/precision":              mean_val_prc,
+                    "valid/recall":                 mean_val_rec,
                     "epoch":                epoch,
                 })
 

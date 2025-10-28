@@ -1,21 +1,20 @@
-import numpy as np
-import pandas as pd
-import scipy.sparse as sp
 import torch
-import torch.nn.functional as F
-from anndata import AnnData
-from typing import Optional, List, Tuple, Union
-from tqdm import tqdm
 import os
 import sys
-import io
-import time
-
 from .model.model import MulanConfig, scMulanModel
 from .model.model_kvcache import scMulanModel_kv
+import torch.nn.functional as F
 from .utils.hf_tokenizer import scMulanTokenizer
-
+import scipy.sparse
+import numpy as np
+from tqdm import tqdm
+from anndata import AnnData
+from typing import Optional, List, Tuple, Union
+import pandas as pd
+import io
 import multiprocessing
+from tqdm import tqdm
+import time
 multiprocessing.set_start_method('spawn',force=True)
 
 class scMulan:
@@ -92,7 +91,7 @@ class scMulan:
     #     return cell_expression_dict
 
     def get_gene_expression_dict(self, i, matrix):
-        if sp.issparse(matrix):
+        if scipy.sparse.issparse(matrix):
             row = matrix.getrow(i).toarray().ravel()
         else:
             row = matrix[i]
@@ -110,7 +109,7 @@ class scMulan:
     #     return cell_expression_dict
 
     def get_gene_expression_dict_with_0s(self, i, matrix):
-        if sp.issparse(matrix):
+        if scipy.sparse.issparse(matrix):
             row = matrix.getrow(i).toarray().ravel()
         else:
             row = matrix[i]
@@ -647,13 +646,13 @@ class scMulan:
 def model_inference(ckp_path: str,
                     adata: AnnData,
                     meta_info_path: str = os.path.join(os.path.dirname(__file__), 'utils', 'meta_info.pt'),
-                    use_kv_cache: Optional[bool] = False,
+                    kv_cache: Optional[bool] = False,
                     **kwargs,
                     ):
     
     ckp = torch.load(ckp_path, map_location='cpu')
     gptconf = MulanConfig(**ckp['model_args'])
-    if use_kv_cache:
+    if kv_cache:
         model = scMulanModel_kv(gptconf)
     else:
         model = scMulanModel(gptconf)
@@ -666,8 +665,7 @@ def model_inference(ckp_path: str,
     tokenizer = scMulanTokenizer(meta_info['token_set'])
     n_express_level = ckp['model_args']['expression_level']
 
-    # scml = scMulan(model,adata,meta_info,tokenizer,n_express_level,**kwargs)
-    scml = scMulan(adata,meta_info,tokenizer,n_express_level,model=model,**kwargs)
+    scml = scMulan(model,adata,meta_info,tokenizer,n_express_level,**kwargs)
 
     return scml
 
@@ -683,7 +681,6 @@ def model_generate(ckp_path: str,
     # ckp['model_args']['expression_level'] = 100
     gptconf = MulanConfig(**ckp['model_args'])
     gptconf.vocab_size = len(meta_info['token_set'])
-    print(adata)
     # bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],gptconf.expression_level)
     bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],n_express_level)
     gptconf.bin_edges = bin_edges
@@ -710,15 +707,16 @@ def model_generate(ckp_path: str,
 
 
 def fine_tuning(
-    adata: AnnData,
-    meta_info: dict,
-    n_express_level: int = 10,
-    **kwargs
-    ):
+                    adata: AnnData,
+                    meta_info: dict,
+                    n_express_level: int = 10,
+                    bin_edges = None,
+                    **kwargs
+                    ):
 
     tokenizer = scMulanTokenizer(meta_info['token_set'])
-    bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],n_express_level)
-
+    if bin_edges is None:
+        bin_edges = compute_global_bin_edges(adata, meta_info['gene_set'],n_express_level)
     scml = scMulan(adata,meta_info,tokenizer,n_express_level, bin_edges=bin_edges, **kwargs)
 
     return scml
@@ -854,9 +852,7 @@ def compute_global_bin_edges(
     adata2 = adata[:, mulan_gene_set]  # subsetted AnnData
 
     X = adata2.X
-    print(adata2)
-    print(X.sum())
-    if sp.issparse(X):
+    if scipy.sparse.issparse(X):
         vals = X.data  # only nonzero values
     else:
         vals = X.ravel()
@@ -939,7 +935,7 @@ def tokens_and_vals_to_expression_row(
     new_vals: List[float],
     return_series: bool = False,
     *,
-    max_violations: int = 2,
+    max_violations: int = 5,
     allow_ties: bool = True,
     enforce_range: bool = True,
     token_min: int = 1,
