@@ -357,11 +357,11 @@ class Inferernce:
                                 )
             results = scml.generate_cell_genesis(
                 idx=range(len(pred_data.obs_names)),
-                max_new_tokens=350,
+                max_new_tokens=500,      #### SET TO 500 FOR GENE UNION
                 top_k=5,
                 verbose=False,
                 return_gt=False,
-                batch_size=4096,#128,
+                batch_size=4096,#128,    ## CHECK THIS SUSPICIOUSLY HIGH BATCH SIZE
                 cheat_with_tokens=None,
                 cheat_with_expr=None,
             )
@@ -426,8 +426,8 @@ class Inferernce:
         # step 3: expression
         real_data.obsm["spatial"] = real_data.obsm["aligned_spatial"]
         assign_shared_colors([real_data,pred_data], color_key="token")
-        plot_spatial_with_palette(real_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"/home/apdeshpa/projects/tissue-generator/{self.config['artifact_dir']}/real_data_clusters.png", saggital="rq4" in self.config["data_mode"])
-        plot_spatial_with_palette(pred_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"/home/apdeshpa/projects/tissue-generator/{self.config['artifact_dir']}/pred_data_clusters.png", saggital="rq4" in self.config["data_mode"])
+        plot_spatial_with_palette(real_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"./{self.config['artifact_dir']}/real_data_clusters.png", saggital="rq4" in self.config["data_mode"])
+        plot_spatial_with_palette(pred_data, color_key="token", spot_size=0.003, figsize=(10,10),save=f"./{self.config['artifact_dir']}/pred_data_clusters.png", saggital="rq4" in self.config["data_mode"])
 
 
 

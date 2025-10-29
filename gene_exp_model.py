@@ -39,14 +39,39 @@ class GeneExpModel(nn.Module):
         unique_subclasses = concatenated_slices.obs[self.label].unique()
         self.num_tokens=len(unique_subclasses)
         try:
-            self.id_to_subclass = pkl.load(open("id_to_subclass.pkl","rb"))
+            self.id_to_subclass = pkl.load(open("/compute/oven-0-13/apdeshpa_duplicate_mimyr/tissue-generator/id_to_subclass.pkl","rb"))
             subclass_to_id = {v:k for k,v in self.id_to_subclass.items()}
-        except:
+        except Exception as e:
+            print(f"Error loading token map: {e}")
             subclass_to_id = {subclass: i for i, subclass in enumerate(unique_subclasses)}
             self.id_to_subclass = {i:subclass for i, subclass in enumerate(unique_subclasses)}
             print("Recreating token map")
         self.subclass_to_id=subclass_to_id
+        # Map subclass labels to token IDs
         concatenated_slices.obs["token"] = concatenated_slices.obs[self.label].map(subclass_to_id)
+
+        # Find NaNs
+        nan_mask = concatenated_slices.obs["token"].isna()
+        num_nans = nan_mask.sum()
+
+        if num_nans > 0:
+            print(f"⚠️ Found {num_nans} unmapped tokens after mapping '{self.label}' → 'token'")
+
+            # Count clusters only where token is NaN
+            cluster_counts = concatenated_slices.obs.loc[nan_mask, "cluster"].value_counts()
+            cluster_counts = cluster_counts[cluster_counts > 0]
+            print("Clusters with unmapped tokens:")
+            print(cluster_counts)
+
+            # Assign the majority (most common) token to these cells
+            majority_token = concatenated_slices.obs["token"].mode()[0]
+            concatenated_slices.obs.loc[nan_mask, "token"] = majority_token
+            print(f"Reassigned missing tokens to majority class: {majority_token}")
+
+
+        # Ensure integer dtype
+        concatenated_slices.obs["token"] = concatenated_slices.obs["token"].astype(int)
+
 
         self.concatenated_slices=concatenated_slices
 

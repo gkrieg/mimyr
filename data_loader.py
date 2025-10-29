@@ -85,7 +85,7 @@ class SliceDataLoader:
         slices2 = [sc.read_h5ad(os.path.join(input_dir, fname)) for fname in tqdm.tqdm(sorted_slices2)]
         
         # CCF coordinate filtering
-        df_ccf = pd.read_csv(f"/home/apdeshpa/projects/tissue-generator/data/ccf-ABCA-{n}.csv").set_index("cell_label")
+        df_ccf = pd.read_csv(f"/compute/oven-0-13/apdeshpa_duplicate_mimyr/tissue-generator/data/ccf-ABCA-{n}.csv").set_index("cell_label")
         for i, slice in enumerate(slices2):
             df_filtered = df_ccf.loc[df_ccf.index.intersection(slice.obs_names)]
             df_filtered = df_filtered.reindex(slice.obs_names)
@@ -586,21 +586,21 @@ class SliceDataLoader:
 
             # Manual split
             # [15, 18,  21,  24, 29, 32, 37,  40, 42,  44]
-            test_indices = [4]
-            val_indices = [3]
+            test_indices = [1]
+            val_indices = [0]
 
 
             test_slices = [slices_tokenized[i] for i in test_indices]
             val_slices = [slices_tokenized[i] for i in val_indices]
 
             # Train = everything except test + val
-            train_indices = [0, 1, 2]
+            train_indices = [2, 3, 4]
             train_slices = [slices_tokenized[i] for i in train_indices]
 
 
             # references: you previously picked [27, 29], keep or adjust as needed
             # References = neighbors (-1, +1) of test slices, if valid
-            ref_indices = [2, 3]
+            ref_indices = [0,3]
 
             self.reference_slices = [slices_tokenized[i] for i in ref_indices]
 
