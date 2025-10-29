@@ -1,8 +1,8 @@
 from anndata import AnnData
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler, SubsetRandomSampler
-from utils.hf_tokenizer import scMulanTokenizer
-from scMulan import scMulan, fine_tuning, generate_prompt_for_cg
+from .utils.hf_tokenizer import scMulanTokenizer
+from .scMulan import scMulan, fine_tuning, generate_prompt_for_cg
 import inspect
 from typing import Tuple, List, Optional
 import pickle as pkl

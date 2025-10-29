@@ -10,7 +10,8 @@ from generative_transformer.data_util import harmonize_dataset
 import torch
 
 class SliceDataLoader:
-    def __init__(self, mode="intra", label="subclass", metadata_dir='/work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata/'):
+    def __init__(self, mode="intra", label="subclass", cfg=None,
+                 metadata_dir='/work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata/'):
         """
         Args:
             mode (str): 'intra' or 'transfer'
@@ -36,6 +37,7 @@ class SliceDataLoader:
         self.test_slices = None
         self.gene_exp_model=None
         self.density_model=None
+        self.cfg = cfg
 
     def load_intra_slices(self, fast=False, fast_select=None):
         # Load only slices1
@@ -184,7 +186,7 @@ class SliceDataLoader:
             train_slices = slices_tokenized[:26] + slices_tokenized[27:28] + slices_tokenized[29:]
             reference_slices = [slices_tokenized[27],slices_tokenized[29]]
 
-            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse_geneunion2_DAG.pt')
+            meta_info = torch.load(f'{self.metadata_dir}{self.cfg["meta_info"]}')
             edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
             for s in train_slices:
                 s = harmonize_dataset(s, meta_info, edges)
@@ -244,7 +246,7 @@ class SliceDataLoader:
             self.reference_slices = [slices_tokenized[i] for i in ref_indices]
             
 
-            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse_geneunion2_DAG.pt')
+            meta_info = torch.load(f'{self.metadata_dir}{self.cfg["meta_info"]}')
             edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
             new_train_slices = []
             for s in train_slices:
@@ -322,7 +324,7 @@ class SliceDataLoader:
             ref_indices = sorted(set(ref_indices))
             self.reference_slices = [slices_tokenized[i] for i in ref_indices]
 
-            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse_geneunion2_DAG.pt')
+            meta_info = torch.load(f'{self.metadata_dir}{self.cfg["meta_info"]}')
             edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
             new_train_slices = []
             for s in train_slices:
@@ -398,7 +400,7 @@ class SliceDataLoader:
 
             self.reference_slices = [remaining_cells_slice for t in test_slices] + [remaining_cells_slice for t in test_slices]
 
-            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse_geneunion2_DAG.pt')
+            meta_info = torch.load(f'{self.metadata_dir}{self.cfg["meta_info"]}')
             edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
             new_train_slices = []
             for s in train_slices:
@@ -466,7 +468,7 @@ class SliceDataLoader:
 
             self.reference_slices = [slices_tokenized[i] for i in ref_indices]
 
-            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse_geneunion2_DAG.pt')
+            meta_info = torch.load(f'{self.metadata_dir}{self.cfg["meta_info"]}')
             edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
             new_train_slices = []
             for s in train_slices:
@@ -535,7 +537,7 @@ class SliceDataLoader:
 
             self.reference_slices = [slices_tokenized[i] for i in ref_indices]
 
-            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse_geneunion2_DAG.pt')
+            meta_info = torch.load(f'{self.metadata_dir}{self.cfg["meta_info"]}')
             edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
             new_train_slices = []
             for s in train_slices:
@@ -604,7 +606,7 @@ class SliceDataLoader:
 
             self.reference_slices = [slices_tokenized[i] for i in ref_indices]
 
-            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse_geneunion2_DAG.pt')
+            meta_info = torch.load(f'{self.metadata_dir}{self.cfg["meta_info"]}')
             edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
             new_train_slices = []
             for s in train_slices:
@@ -653,7 +655,7 @@ class SliceDataLoader:
 
             train_slices = slices_tokenized
 
-            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse_geneunion2_DAG.pt')
+            meta_info = torch.load(f'{self.metadata_dir}{self.cfg["meta_info"]}')
             edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
             new_train_slices = []
             for s in train_slices:
@@ -875,7 +877,7 @@ class SliceDataLoader:
             reference_slices = [slices_tokenized[27],slices_tokenized[29]]
 
             
-            meta_info = torch.load(f'{self.metadata_dir}4hierarchy_metainfo_mouse_geneunion2_DAG.pt')
+            meta_info = torch.load(f'{self.metadata_dir}{self.cfg["meta_info"]}')
             edges = [f'{self.metadata_dir}edges_x.pkl',f'{self.metadata_dir}edges_y.pkl',f'{self.metadata_dir}edges_z.pkl']
             new_train_slices = []
             for s in train_slices:

@@ -293,7 +293,7 @@ class Inferernce:
 
 
             
-            meta_info_path = f'{self.slice_data_loader.metadata_dir}4hierarchy_metainfo_mouse_geneunion2_DAG.pt'
+            meta_info_path = f'{self.slice_data_loader.metadata_dir}{self.config["meta_info"]}'
             meta_info = torch.load(meta_info_path)
 
             # 1) preserve obs but add necessary technology metadata, etc.
@@ -333,9 +333,19 @@ class Inferernce:
             # pred_data.obs['<z>'] = real_data.obs.loc[pred_data.obs_names,'<z>']
 
             ## USE PRED DATA HERE
-            pred_data.obs['<x>'] = pred_data.obsm['spatial'][:,2]
-            pred_data.obs['<y>'] = pred_data.obsm['spatial'][:,1]
-            pred_data.obs['<z>'] = pred_data.obsm['spatial'][:,0]
+            pred_data.obs['x'] = pred_data.obsm['spatial'][:,2]
+            pred_data.obs['y'] = pred_data.obsm['spatial'][:,1]
+            pred_data.obs['z'] = pred_data.obsm['spatial'][:,0]
+
+            coordfiles = [f'{self.slice_data_loader.metadata_dir}edges_x.pkl',
+                          f'{self.slice_data_loader.metadata_dir}edges_y.pkl',
+                          f'{self.slice_data_loader.metadata_dir}edges_z.pkl',
+                         ]
+            for coord, coordfile in zip(('x','y','z'),coordfiles):
+                vals_full = pred_data.obs[f'{coord}']
+                edges = pkl.load(open(coordfile, 'rb'))
+                bin_idxs = np.digitize(vals_full, edges, right=True)
+                pred_data.obs[f'<{coord}>'] = bin_idxs
 
 
 
@@ -352,7 +362,7 @@ class Inferernce:
             ckp_path = self.config["expression_model_checkpoint"]#'/compute/oven-0-13/skrieger/mouse-mediummodelscrna/epoch110_model.pt'
             scml = model_inference(ckp_path=ckp_path,
                                 adata=adata_sub,
-                                meta_info_path=meta_info_path,
+                                meta_info=meta_info,
                                 use_kv_cache=True,
                                 )
             results = scml.generate_cell_genesis(
@@ -370,8 +380,6 @@ class Inferernce:
             rows = np.array(rows)
             obs = pred_data.obs.copy()
 
-            # 2) make a var DataFrame of length 550
-            var = pd.DataFrame(index=real_data.var_names)
 
             # 4) re-create
             adata = AnnData(X=rows, obs=obs, var=scml.adata.var, obsm=pred_data.obsm)

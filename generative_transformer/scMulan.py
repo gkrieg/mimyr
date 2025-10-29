@@ -55,7 +55,6 @@ class scMulan:
         self.n_express_level = n_express_level
         if bin_edges is not None:
             self.bin_edges = torch.tensor(bin_edges)
-
         self.mulan_gene_set = meta_info['gene_set']
         # self.mulan_cell_type_entities = list(meta_info['cell_type'] | meta_info['MCT'])
 
@@ -645,14 +644,14 @@ class scMulan:
 
 def model_inference(ckp_path: str,
                     adata: AnnData,
-                    meta_info_path: str = os.path.join(os.path.dirname(__file__), 'utils', 'meta_info.pt'),
-                    kv_cache: Optional[bool] = False,
+                    meta_info: dict,
+                    use_kv_cache: Optional[bool] = False,
                     **kwargs,
                     ):
     
     ckp = torch.load(ckp_path, map_location='cpu')
     gptconf = MulanConfig(**ckp['model_args'])
-    if kv_cache:
+    if use_kv_cache:
         model = scMulanModel_kv(gptconf)
     else:
         model = scMulanModel(gptconf)
@@ -660,12 +659,10 @@ def model_inference(ckp_path: str,
     model.load_state_dict(ckp['model'])
     model.eval()
     model.hidden_dim = ckp['model_args']['n_embd']
-    # model.half()
-    meta_info = torch.load(meta_info_path)
     tokenizer = scMulanTokenizer(meta_info['token_set'])
     n_express_level = ckp['model_args']['expression_level']
 
-    scml = scMulan(model,adata,meta_info,tokenizer,n_express_level,**kwargs)
+    scml = scMulan(adata,meta_info,tokenizer,n_express_level,model=model,**kwargs)
 
     return scml
 

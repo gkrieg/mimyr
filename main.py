@@ -50,7 +50,6 @@ class TrainConfig:
     ema_decay: float = 0.999
 
 
-
 # ----------------- argparse -----------------
 def get_args():
     parser = argparse.ArgumentParser(description="Run inference with config options.")
@@ -64,7 +63,7 @@ def get_args():
                         default="model_checkpoints/best_model_intra2hole.pt",
                         help="Path to trained location checkpoint")
     parser.add_argument("--cluster_model_checkpoint", type=str,  ### CHANGE
-                        default="experimentation/best_model_rq3.pt",
+                        default="model_checkpoints/best_model_cluster1.pt",
                         help="Path to trained CelltypeModel checkpoint")    
     parser.add_argument("--expression_model_checkpoint", type=str,  ### CHANGE
                             default="/compute/oven-0-13/skrieger/Zhuang-2/epoch120_model.pt",
@@ -106,6 +105,9 @@ def get_args():
     parser.add_argument("--out_csv", type=str,
                         default="results/debugging_rq3_spencer.csv",
                         help="Output CSV file path")
+    parser.add_argument("--meta_info", type=str,
+                        default="4hierarchy_metainfo_mouse_geneunion2_DAG.pt",
+                        help="meta_info file path for GE prediction")
 
 
     return parser.parse_args()
@@ -130,7 +132,7 @@ def main():
     # data_for_model_init = SliceDataLoader(mode="rq1", label=args.data_label)
     # data_for_model_init.prepare()
 
-    slice_data_loader = SliceDataLoader(mode=args.data_mode, label=args.data_label)
+    slice_data_loader = SliceDataLoader(mode=args.data_mode, label=args.data_label, cfg=copy.deepcopy(cfg))
     slice_data_loader.prepare()
 
     
