@@ -371,7 +371,7 @@ class Inferernce:
                 top_k=5,
                 verbose=False,
                 return_gt=False,
-                batch_size=4096,#128,    ## CHECK THIS SUSPICIOUSLY HIGH BATCH SIZE
+                batch_size=3500,#128,    ## CHECK THIS SUSPICIOUSLY HIGH BATCH SIZE
                 cheat_with_tokens=None,
                 cheat_with_expr=None,
             )

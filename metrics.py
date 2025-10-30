@@ -377,9 +377,11 @@ def _nnz_per_gene(X):
         return np.asarray(X.getnnz(axis=0)).ravel()
     return np.asarray((X > 0).sum(axis=0)).ravel()
 
-def intersect_and_filter_X(gt_adata, pred_adata, min_expr_cells=0):
+def intersect_and_filter_X(gt_adata, pred_adata, min_expr_cells=0, gene_set=None):
     # 1) intersect genes (order is preserved by AnnData slicing)
     common_genes = gt_adata.var_names.intersection(pred_adata.var_names)
+    if gene_set is not None:
+        common_genes = common_genes.intersection(np.asarray(gene_set))
 
 
     if len(common_genes) == 0:
@@ -414,9 +416,9 @@ def intersect_and_filter_X(gt_adata, pred_adata, min_expr_cells=0):
 import numpy as np
 import tqdm
 from scipy.spatial import cKDTree
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, spearmanr
 
-def soft_correlation(gt_adata, gt_positions, pred_adata, pred_positions, radius=None, k=0, sample=None, return_list=False):
+def soft_correlation(gt_adata, gt_positions, pred_adata, pred_positions, radius=None, k=0, sample=None, return_list=False, corr_type='pearson', gene_set=None):
     """
     gt_expressions, pred_expressions: list or array of gene expression vectors (shape [num_cells, num_genes])
     gt_positions, pred_positions: list or array of positions (shape [num_cells, 2] or [num_cells, 3])
@@ -424,7 +426,13 @@ def soft_correlation(gt_adata, gt_positions, pred_adata, pred_positions, radius=
     k: number of neighbors to consider (if k>0)
     sample: if provided, percentage of gt_positions to sample
     """
-    gt_expressions, pred_expressions, genes = intersect_and_filter_X(gt_adata, pred_adata, 1)
+
+    if corr_type == "pearson":          
+        corr_fn = pearsonr                      
+    elif corr_type == "spearman":                 
+        corr_fn = spearmanr   
+    gt_expressions, pred_expressions, genes = intersect_and_filter_X(gt_adata, pred_adata, 1, gene_set)
+    print(f'running soft_correlation on {len(genes)} genes')
     gt_positions = np.array(gt_positions)
     pred_positions = np.array(pred_positions)
     gt_expressions = np.array(gt_expressions)
@@ -463,8 +471,8 @@ def soft_correlation(gt_adata, gt_positions, pred_adata, pred_positions, radius=
 
         pred_sum[0]=pred_sum[0]+1e-15  # to avoid NaN in pearsonr when pred_sum is all zeros
 
-        correlations_all.append(pearsonr(gt_sum, pred_sum)[0])
-
+        correlations_all.append(corr_fn(gt_sum, pred_sum)[0])
+            
         if i % 10000 == 0 and i > 0:
             print(f"Processed {i} samples...")
 
@@ -477,7 +485,7 @@ def soft_correlation(gt_adata, gt_positions, pred_adata, pred_positions, radius=
     if return_list:
         return correlations_all
 
-    correlation, _ = pearsonr(gt_sums, pred_sums)
+    correlation, _ = corr_fn(gt_sums, pred_sums)
     return correlation
 
 

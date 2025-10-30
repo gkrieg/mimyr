@@ -2,8 +2,9 @@ import torch
 
 from metrics import soft_accuracy, soft_correlation, neighborhood_enrichment, soft_f1, delauney_colocalization, gridized_l1_distance, gridized_kl_divergence, soft_gene_distance
 class Evaluator:
-    def __init__(self, config):
+    def __init__(self, config,metadata_dir='/work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata/'):
         self.config = config
+        self.gene_set = torch.load(f"{metadata_dir}{config['meta_info']}")['gene_set']
 
     def evaluate(self, predicted_adata, target_adata, sample=100):
         results = {}
@@ -60,9 +61,22 @@ class Evaluator:
             #     results[f"soft_correlation@{k}"]=sc
 
             for r in [0.03, 0.04, 0.05, 0.07, 0.1]:
-                sc=soft_correlation(target_adata,target_adata.obsm["aligned_spatial"],predicted_adata,predicted_adata.obsm["spatial"],radius=r,sample=sample)
+                sc=soft_correlation(target_adata,target_adata.obsm["aligned_spatial"],predicted_adata,
+                                    predicted_adata.obsm["spatial"],radius=r,sample=sample,corr_type='pearson',gene_set=self.gene_set)
                 print("soft correlation radius @",r,":",sc)
                 results[f"soft_correlation_radius@{r}"]=sc
+
+        if "soft_spearman_correlation" in self.config["metrics"]:
+            # for k in [5, 10, 20]:
+            #     sc=soft_correlation(target_adata,target_adata.obsm["aligned_spatial"],predicted_adata,predicted_adata.obsm["spatial"],k=k,sample=sample)
+            #     print("soft correlation @",k,":",sc)
+            #     results[f"soft_correlation@{k}"]=sc
+
+            for r in [0.03, 0.04, 0.05, 0.07, 0.1]:
+                sc=soft_correlation(target_adata,target_adata.obsm["aligned_spatial"],predicted_adata,
+                                    predicted_adata.obsm["spatial"],radius=r,sample=sample,corr_type='spearman',gene_set=self.gene_set)
+                print("soft spearman correlation radius @",r,":",sc)
+                results[f"soft_spearman_correlation_radius@{r}"]=sc
 
         # F1
         if "soft_f1" in self.config["metrics"]:
