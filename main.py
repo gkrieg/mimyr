@@ -63,7 +63,7 @@ def get_args():
                         default="model_checkpoints/best_model_intra2hole.pt",
                         help="Path to trained location checkpoint")
     parser.add_argument("--cluster_model_checkpoint", type=str,  ### CHANGE
-                        default="model_checkpoints/best_model_cluster1.pt",
+                        default="experimentation/best_model_cluster1.pt",
                         help="Path to trained CelltypeModel checkpoint")    
     parser.add_argument("--expression_model_checkpoint", type=str,  ### CHANGE
                             default="/compute/oven-0-13/skrieger/Zhuang-2/epoch120_model.pt",
