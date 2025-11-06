@@ -79,11 +79,14 @@ class Inferernce:
 
             elif self.config["data_mode"] == "rq4":
                 xyz=self.location_model[0].sample_with_guidance(
-                        adata.n_obs,
+                        adata.n_obs*2,
                         self.location_model[1],
                         conditional_x=new_tissue.obsm["aligned_spatial"].mean(0)[0],
                         guidance_scale=self.config["guidance_signal"]
                     )
+                # filter to new tissue y,z bounds
+                xyz = xyz[(xyz[:, 1] > new_tissue.obsm["aligned_spatial"].min(0)[1]) & (xyz[:, 1] < new_tissue.obsm["aligned_spatial"].max(0)[1]) & (xyz[:, 0] > new_tissue.obsm["aligned_spatial"].min(0)[0]) & (xyz[:, 0] < new_tissue.obsm["aligned_spatial"].max(0)[0])]    
+                
 
 
 
@@ -133,7 +136,10 @@ class Inferernce:
         elif loc_type == "closest_slice":
             closest_ref_slice = np.argmin([np.square(ref_slice.obsm["aligned_spatial"].mean(0)[-1] - new_tissue.obsm["aligned_spatial"].mean(0)[-1]) for ref_slice in self.slice_data_loader.reference_slices])
             xyz = self.slice_data_loader.reference_slices[closest_ref_slice].obsm["aligned_spatial"].copy()
-            xyz[:, -1] = new_tissue.obsm["aligned_spatial"].mean(0)[-1]
+            if self.config["data_mode"] == "rq4":
+                xyz[:,0] = new_tissue.obsm["aligned_spatial"].mean(0)[0]
+            else:
+                xyz[:, -1] = new_tissue.obsm["aligned_spatial"].mean(0)[-1]
 
         elif loc_type == "uniform_circle":
 

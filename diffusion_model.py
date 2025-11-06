@@ -496,12 +496,15 @@ class DDPMTrainer:
 
             # reverse update
             z = torch.randn_like(x) if t > 0 else 0
+            x_og=x
             x = sqrt_recip_alpha * (x - (1 - alpha_t) / sqrt_one_minus_alpha_bar * guided_noise) \
                 + torch.sqrt(beta_t) * z
 
             # re-enforce condition on z-dimension
             if conditional_z is not None:
                 x[:, 2] = conditional_z
+            elif t/self.cfg.n_timesteps < 0.5:
+                x[:, 2] = x_og[:, 2]
 
             if conditional_x is not None:
                 x[:, 0] = conditional_x
