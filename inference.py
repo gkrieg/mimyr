@@ -303,7 +303,7 @@ class Inferernce:
             meta_info = torch.load(meta_info_path)
 
             # 1) preserve obs but add necessary technology metadata, etc.
-            for name, default in zip(['organ', 'technology', 'species', 'disease_state'], ['brain','M550','mouse','healthy']):
+            for name, default in zip(['organ', 'technology', 'species', 'disease_state'], ['Brain','M550','mouse','healthy']):
                 if name in real_data.obs.columns:
                     pred_data.obs[name] = real_data.obs[name]
                 else:
@@ -357,11 +357,15 @@ class Inferernce:
 
             obs = pred_data.obs.copy()
 
-            # 2) make a var DataFrame of length 550
-            var = pd.DataFrame(index=real_data.var_names)
+            if self.config['full_gene_panel']:
+                print(f'using full gene set of {len(meta_info["gene_set"])} genes')
+                var = pd.DataFrame(index=meta_info['gene_set'])
+            else:
+                var = pd.DataFrame(index=real_data.var_names)
+            
 
             # 3) build brand-new X as zeros, sparse
-            X_sparse = np.zeros((len(pred_data.obs_names),len(real_data.var_names)))
+            X_sparse = np.zeros((len(pred_data.obs_names),len(var.index)))
 
             # 4) re-create
             adata_sub = AnnData(X=X_sparse, obs=obs, var=var, obsm=pred_data.obsm.copy())
@@ -373,13 +377,14 @@ class Inferernce:
                                 )
             results = scml.generate_cell_genesis(
                 idx=range(len(pred_data.obs_names)),
-                max_new_tokens=500,      #### SET TO 500 FOR GENE UNION
+                max_new_tokens=500,      
                 top_k=5,
                 verbose=False,
                 return_gt=False,
-                batch_size=3500,#128,    ## CHECK THIS SUSPICIOUSLY HIGH BATCH SIZE
+                batch_size=1500,#128,   
                 cheat_with_tokens=None,
                 cheat_with_expr=None,
+                fast=True,
             )
             rows = [r[0] for r in results]
 

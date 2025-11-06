@@ -513,8 +513,259 @@ class scMulanModel_kv(nn.Module):
     
         return predicted_gene_tokens, predicted_expression_bins, predicted_real_expr
 
+    
+    @torch.no_grad()
+    def generate_cellGenesis_fast(self,
+                             input_ids,
+                             expression_level,
+                             max_new_tokens,
+                             ignore_Idx=None,
+                             top_k=None,
+                             gamma=1.0,
+                             override_gene_sequence=None,
+                             override_expr_sequence=None,
+                             verbose=False):
+        """
+        Pruned decoding with correct KV-cache indexing.
+        - Advances only unfinished rows.
+        - Maintains an 'alive' mapping of original batch indices currently in the cache.
+        - Scatters per-step results back to full (B, 1) tensors, so returns are (B, L).
+    
+        Sampling semantics match your original (mask -> softmax over full vocab -> multinomial -> forced EOS).
+        """
+    
+        device = input_ids.device
+        B = input_ids.size(0)
+        T0 = input_ids.size(1)
+        Tmax = T0 + max_new_tokens
+    
+        # Preallocate rolling buffers for bookkeeping (full batch)
+        real_expr_prefix = expression_level.float()
+        out_idx  = input_ids.new_full((B, Tmax), 0)
+        out_expr = expression_level.new_full((B, Tmax), 0)
+        out_real = real_expr_prefix.new_zeros((B, Tmax))
+        out_idx[:, :T0]  = input_ids
+        out_expr[:, :T0] = expression_level
+        out_real[:, :T0] = real_expr_prefix
+    
+        # Per-step full-batch outputs (we'll cat at the end)
+        step_tokens_full, step_bins_full, step_real_full = [], [], []
+    
+        # Global finished flags (size B)
+        finished_global = torch.zeros(B, dtype=torch.bool, device=device)
+        write_pos = T0
+        eos_id = 0
+        eos_threshold = 0.95
+    
+        # Start with ALL rows in the cache, in original order
+        alive = torch.arange(B, device=device, dtype=torch.long)  # maps cache rows -> original batch idx
+    
+        # Build initial KV cache from the full prefix
+        _, _, _, past_key_values = self(
+            idx=out_idx[:, :write_pos],
+            x_expr=out_expr[:, :write_pos],
+            past_key_values=None
+        )
+    
+        # Prepare ignore mask builder (tied to vocab size)
+        ignore_mask = None
+        def _build_ignore_mask(V):
+            nonlocal ignore_mask
+            if ignore_Idx is None:
+                ignore_mask = None
+                return
+            if isinstance(ignore_Idx, int):
+                idx = torch.tensor([ignore_Idx], device=device, dtype=torch.long)
+            elif isinstance(ignore_Idx, (list, tuple)):
+                idx = torch.tensor(ignore_Idx, device=device, dtype=torch.long)
+            else:
+                idx = ignore_Idx.to(device=device, dtype=torch.long)
+            idx = idx.clamp(min=0, max=V-1)
+            ignore_mask = torch.zeros((1, V), dtype=torch.bool, device=device)
+            ignore_mask.scatter_(1, idx.view(1, -1), True)
+    
+        while write_pos < Tmax:
+            # Finished flags relative to current cache (alive)
+            finished_rel = finished_global[alive]               # (Ba,)
+            rel_active = (~finished_rel).nonzero(as_tuple=False).squeeze(1)  # indices into cache rows
+            if rel_active.numel() == 0:
+                break  # all done
+    
+            # Global indices for active rows (for scatter back)
+            global_idx = alive[rel_active]                      # (Ba,)
+    
+            # One-step inputs for active rows
+            last_tok_active  = out_idx[global_idx,  write_pos-1:write_pos]   # (Ba,1)
+            last_expr_active = out_expr[global_idx, write_pos-1:write_pos]   # (Ba,1)
+    
+            # Slice PKV by RELATIVE indices (cache is currently ordered by 'alive')
+            pkv_active = _pkv_index_select(past_key_values, rel_active)
+    
+            # One-step forward
+            logits_cls_a, logits_bins_a, logits_real_a, pkv_next = self(
+                idx=last_tok_active,
+                x_expr=last_expr_active,
+                past_key_values=pkv_active
+            )
+            # After this step, the cache should ONLY contain the active rows in the same order
+            past_key_values = pkv_next
+            # And 'alive' should also be reduced to only those active rows (we'll drop finished after sampling)
+            alive_active = global_idx.clone()                   # current active's global ids
+    
+            # Extract last-step logits for active rows
+            logits_cls_step  = logits_cls_a[:, -1, :]           # (Ba, V)
+            logits_bins_step = logits_bins_a[:, -1, :]          # (Ba, E)
+            V = logits_cls_step.size(1)
+    
+            # Build/refresh ignore mask when V changes
+            if ignore_mask is None or ignore_mask.size(1) != V:
+                _build_ignore_mask(V)
+    
+            # Real-valued head: normalize to (Ba,) and (Ba,1)
+            # lr = logits_real_a[:, -1]
+            # next_real_vec = lr.squeeze()
+            # if next_real_vec.dim() != 1:
+            #     next_real_vec = next_real_vec.view(next_real_vec.size(0))
+            # next_real_col = next_real_vec.unsqueeze(1)          # (Ba,1)
+            Ba = logits_real_a.size(0)                                # active batch size
+            lr = logits_real_a[:, -1]                                 # could be (Ba,), (Ba,1), or (Ba,1,1)
+            # Flatten trailing dims, keep first element per row → (Ba,)
+            next_real_vec = lr.reshape(Ba, -1)[:, 0].contiguous()
+            next_real_col = next_real_vec.unsqueeze(1)                # (Ba,1)
+
+    
+            # Apply ignore mask
+            if ignore_mask is not None:
+                logits_cls_step = logits_cls_step.masked_fill(ignore_mask, float('-inf'))
+    
+            # No-repeat mask (use SEEN TOKENS from GLOBAL buffers)
+            seen_active = out_idx[alive_active, :write_pos]     # (Ba, Tprev)
+            seen_active = seen_active.clamp(min=0, max=V-1).to(dtype=torch.long)
+            seen_mask = torch.zeros_like(logits_cls_step, dtype=torch.bool)  # (Ba, V)
+            seen_mask.scatter_(1, seen_active, True)
+            logits_cls_step = logits_cls_step.masked_fill(seen_mask, float('-inf'))
+    
+            # Optional safe top-k
+            if top_k is not None:
+                logits_cls_step = _safe_topk_mask_(logits_cls_step, top_k)
+    
+            # Ensure at least one finite logit per row (EOS fallback)
+            row_has_finite = torch.isfinite(logits_cls_step).any(dim=1)
+            if not row_has_finite.all():
+                bad = ~row_has_finite
+                logits_cls_step[bad, :] = float('-inf')
+                eos_id_safe = 0 if V == 0 else min(max(0, eos_id), V - 1)
+                logits_cls_step[bad, eos_id_safe] = 0.0
+    
+            # Sample
+            probs = F.softmax(logits_cls_step, dim=-1)
+            forced_eos = probs[:, eos_id] >= eos_threshold
+            sampled_tokens = torch.multinomial(probs, num_samples=1)        # (Ba,1)
+            next_token_active = torch.where(
+                forced_eos.unsqueeze(1),
+                sampled_tokens.new_full((sampled_tokens.size(0), 1), eos_id),
+                sampled_tokens
+            )  # (Ba,1)
+    
+            # Expression-bin for active rows
+            bin_next_active = torch.argmax(logits_bins_step, dim=-1, keepdim=True)  # (Ba,1)
+    
+            # Build full-batch (B,1) outputs for this step and scatter active results
+            tok_full  = input_ids.new_full((B, 1), eos_id)
+            bin_full  = expression_level.new_full((B, 1), 0)
+            real_full = out_real.new_zeros((B, 1))
+            tok_full[alive_active]  = next_token_active
+            bin_full[alive_active]  = bin_next_active
+            real_full[alive_active] = next_real_col
+            step_tokens_full.append(tok_full)
+            step_bins_full.append(bin_full)
+            step_real_full.append(real_full)
+    
+            # Overrides (apply to active rows only)
+            step_idx = write_pos
+            if override_gene_sequence is not None and step_idx < override_gene_sequence.size(1):
+                next_token_input_active = override_gene_sequence[alive_active, step_idx:step_idx+1]
+            else:
+                next_token_input_active = next_token_active
+    
+            if override_expr_sequence is not None and step_idx < override_expr_sequence.size(1):
+                next_expr_input_active = override_expr_sequence[alive_active, step_idx:step_idx+1]
+            else:
+                next_expr_input_active = bin_next_active
+    
+            # Write next tokens/expr into rolling buffers for active rows
+            out_idx[alive_active,  write_pos:write_pos+1] = next_token_input_active
+            out_expr[alive_active, write_pos:write_pos+1] = next_expr_input_active
+            out_real[alive_active, write_pos:write_pos+1] = next_real_col
+    
+            # Update finished flags globally for active rows
+            newly_finished_active = (next_token_active.squeeze(1) == eos_id)  # (Ba,)
+            finished_global[alive_active] |= newly_finished_active
+    
+            # Shrink 'alive' and cache to ONLY rows that are still unfinished after this step
+            keep_rel = ~newly_finished_active                              # (Ba,)
+            if keep_rel.any():
+                # Reorder cache and 'alive' to only unfinished rows
+                keep_rel_idx = keep_rel.nonzero(as_tuple=False).squeeze(1) # rel indices to keep
+                past_key_values = _pkv_index_select(past_key_values, keep_rel_idx)
+                alive = alive_active[keep_rel_idx]                         # update mapping
+            else:
+                # No rows left in cache
+                alive = alive_active.new_empty((0,), dtype=torch.long)
+                past_key_values = _pkv_index_select(past_key_values, keep_rel.nonzero(as_tuple=False).squeeze(1))  # empty select
+    
+            write_pos += 1
+            if finished_global.all():
+                break
+    
+        # Concatenate step outputs to (B, L)
+        if step_tokens_full:
+            predicted_gene_tokens     = torch.cat(step_tokens_full, dim=1)
+            predicted_expression_bins = torch.cat(step_bins_full,   dim=1)
+            predicted_real_expr       = torch.cat(step_real_full,   dim=1)
+        else:
+            predicted_gene_tokens     = input_ids.new_zeros((B, 0), dtype=input_ids.dtype)
+            predicted_expression_bins = expression_level.new_zeros((B, 0), dtype=expression_level.dtype)
+            predicted_real_expr       = out_real.new_zeros((B, 0))
+    
+        return predicted_gene_tokens, predicted_expression_bins, predicted_real_expr
 
 
+def _safe_topk_mask_(logits: torch.Tensor, k: int) -> torch.Tensor:
+    """
+    In-place-ish mask: keep top-k per row, set others to -inf.
+    Handles k<=0, k>=V, and NaNs.
+    """
+    if k is None:
+        return logits
+    V = logits.size(-1)
+    try:
+        k = int(k)
+    except Exception:
+        return logits
+    if k <= 0 or k >= V:
+        return logits
+    # Replace NaNs with -inf to make ordering defined
+    neg_inf = logits.new_full((), float('-inf'))
+    logits = torch.where(torch.isnan(logits), neg_inf, logits)
+    v, _ = torch.topk(logits, k, dim=-1)  # (B, k)
+    kth = v[:, [-1]]                      # (B, 1)
+    logits.masked_fill_(logits < kth, neg_inf)
+    return logits
+
+def _pkv_index_select(past_key_values, rel_index):
+    """
+    Select batch dim (dim=0) of KV cache by RELATIVE indices.
+    Assumes PKV structure: list of (k, v) per layer with shapes (Ba, ...).
+    """
+    if past_key_values is None:
+        return None
+    new_pkv = []
+    for k, v in past_key_values:
+        new_k = k.index_select(0, rel_index)
+        new_v = v.index_select(0, rel_index)
+        new_pkv.append((new_k, new_v))
+    return new_pkv
 
 @dataclass
 class SampleDecoderOutput(SampleDecoderOnlyOutput):

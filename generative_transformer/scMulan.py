@@ -436,6 +436,7 @@ class scMulan:
         cheat_with_expr: bool = False,
         batch_size: int = 12,
         verbose: bool = False,
+        fast=False,
         **generate_kwargs
     ):
         """
@@ -541,16 +542,28 @@ class scMulan:
     
             # === Model Call ===
             t3 = time.time()
-            generated_ids, generated_vals_binned, generated_vals = self.model.generate_cellGenesis(
-                input_ids=input_ids,
-                expression_level=input_vals,
-                max_new_tokens=max_new_tokens + input_ids.shape[1],
-                top_k=top_k,
-                override_gene_sequence=override_gene_sequence if cheat_with_tokens else None,
-                override_expr_sequence=override_expr_sequence if cheat_with_expr else None,
-                verbose=verbose,
-                **generate_kwargs
-            )
+            if fast:
+                generated_ids, generated_vals_binned, generated_vals = self.model.generate_cellGenesis_fast(
+                    input_ids=input_ids,
+                    expression_level=input_vals,
+                    max_new_tokens=max_new_tokens + input_ids.shape[1],
+                    top_k=top_k,
+                    override_gene_sequence=override_gene_sequence if cheat_with_tokens else None,
+                    override_expr_sequence=override_expr_sequence if cheat_with_expr else None,
+                    verbose=verbose,
+                    **generate_kwargs
+                )
+            else:
+                generated_ids, generated_vals_binned, generated_vals = self.model.generate_cellGenesis(
+                    input_ids=input_ids,
+                    expression_level=input_vals,
+                    max_new_tokens=max_new_tokens + input_ids.shape[1],
+                    top_k=top_k,
+                    override_gene_sequence=override_gene_sequence if cheat_with_tokens else None,
+                    override_expr_sequence=override_expr_sequence if cheat_with_expr else None,
+                    verbose=verbose,
+                    **generate_kwargs
+                )
             if verbose:
                 print(f"  Model generation took {time.time() - t3:.2f} secondss")
     
