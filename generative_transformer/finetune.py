@@ -2,7 +2,7 @@
 """
 finetune.py
 
-Fine-tune scMulanModel on conditional generation with coordinate tokens,
+Fine-tune MimyrModel on conditional generation with coordinate tokens,
 including a held-out validation split.
 """
 import os
@@ -22,13 +22,11 @@ import scipy.sparse as sp
 import pandas as pd
 from anndata import AnnData
 
-root_path = os.path.abspath('/work/magroup/skrieger/scMulan/Tutorials/scMulan')
-sys.path.append(os.path.abspath(root_path))
 
-from model.model import MulanConfig, scMulanModel
-from utils.hf_tokenizer import scMulanTokenizer
+from model.model import MimyrConfig, MimyrModel
+from utils.hf_tokenizer import MimyrTokenizer
 from data_util import get_generation_dataloader, harmonize_dataset, summarize_sample_ddp
-from scMulan import tokens_and_vals_to_expression_row
+from Mimyr import tokens_and_vals_to_expression_row
 
 from scipy.stats import pearsonr
 import numpy as np
@@ -87,7 +85,7 @@ def evaluate_expression_correlation(
         Output of the model (B, T, vocab_size) — token logits.
     logits_exp_real : Tensor
         Output of the model (B, T, 1) — real-valued expression predictions.
-    tokenizer : scMulanTokenizer
+    tokenizer : MimyrTokenizer
         Tokenizer used to map tokens to strings.
     tokens_and_vals_to_expression_row_fn : function
         The function that builds a gene expression vector from tokens and values.
@@ -362,7 +360,7 @@ def rebalance_sampling_mass(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Fine-tune scMulanModel on conditional generation with coords + validation"
+        description="Fine-tune MimyrModel on conditional generation with coords + validation"
     )
     parser.add_argument("--ckp-path",    type=str, default=None,
                         help="Path to pretrained checkpoint (.pt)")
@@ -507,9 +505,9 @@ def main():
         print(f"Overwriting config.vocab_size to {args.overwrite_vocab_size}")
     if args.new_expression_size is not None and args.from_finetuned:
         ckp['model_args']['expression_level'] = args.new_expression_size
-    gptconf = MulanConfig(**ckp['model_args'])
+    gptconf = MimyrConfig(**ckp['model_args'])
     print(gptconf)
-    ModelClass = scMulanModel
+    ModelClass = MimyrModel
     model = ModelClass(gptconf)
     # device = torch.device(args.device)
     
@@ -522,7 +520,7 @@ def main():
     print('loaded meta_info')
     
     # 3) Initialize tokenizer and resize model embeddings/output
-    tokenizer = scMulanTokenizer(meta_info['token_set'])
+    tokenizer = MimyrTokenizer(meta_info['token_set'])
     if not args.from_finetuned:
         sep = meta_info.get('sep_token', '<SPToken1>')
         tokenizer.add_special_tokens({'sep_token': sep})
@@ -784,7 +782,7 @@ def main():
     # 6) Initialize W&B
     if rank == 0:
         wandb.init(
-            project="scMulan-finetune",
+            project="Mimyr-finetune",
             name=f'{os.path.basename(args.output_dir)}_bs{args.batch_size}',
             config={
                 "epochs":       args.epochs,
@@ -994,7 +992,7 @@ def main():
 
     # 8) Save final artifacts
     # model.save_pretrained(args.output_dir)
-    MulanConfig(**ckp['model_args']).save_pretrained(args.output_dir)
+    MimyrConfig(**ckp['model_args']).save_pretrained(args.output_dir)
     tokenizer.save_pretrained(args.output_dir)
     print(f"Finetuned artifacts written to {args.output_dir}")
     if rank == 0:

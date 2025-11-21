@@ -83,7 +83,7 @@ class Block(nn.Module):
         return x
 
 @dataclass
-class MulanConfig:
+class MimyrConfig:
     block_size: int = 1000
     vocab_size: int = 1011 
     n_layer: int = 12
@@ -97,7 +97,7 @@ class MulanConfig:
     bin_edges: np.ndarray = None
 
 
-class scMulanModel(nn.Module):
+class MimyrModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.vocab_size is not None

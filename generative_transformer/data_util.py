@@ -1,13 +1,13 @@
 from anndata import AnnData
 import torch
 from torch.utils.data import Dataset, DataLoader, Sampler, SubsetRandomSampler
-from .utils.hf_tokenizer import scMulanTokenizer
-from .scMulan import scMulan, fine_tuning, generate_prompt_for_cg
+from .utils.hf_tokenizer import MimyrTokenizer
+from .Mimyr import Mimyr, fine_tuning, generate_prompt_for_cg
 import inspect
 from typing import Tuple, List, Optional
 import pickle as pkl
 import scipy.sparse as sp
-# from scMulan import generate_cellGenesis
+# from Mimyr import generate_cellGenesis
 
 import pandas as pd
 import numpy as np
@@ -22,9 +22,9 @@ class _AnndataGenDataset(Dataset):
         adata: AnnData,
         meta_pool: dict,
         sep_token: str,
-        tokenizer: scMulanTokenizer,
+        tokenizer: MimyrTokenizer,
         max_len: int,
-        scm: scMulan,
+        scm: Mimyr,
         include_0s: bool,
         add_xyz_noise: bool,
         min_max_bounds: List[int],
@@ -311,7 +311,7 @@ def get_generation_dataloader(
     Works in single-GPU and DDP. If DDP is initialized, indices are sharded by rank.
     """
     # 1) tokenizer
-    tokenizer = scMulanTokenizer(meta_info['token_set'])
+    tokenizer = MimyrTokenizer(meta_info['token_set'])
     tokenizer.add_special_tokens({'sep_token': meta_info.get('sep_token', '<SPToken1>')})
     tokenizer.pad_token = '<SPToken10>'
 
@@ -422,7 +422,7 @@ def get_generation_dataloader(
 #     DataLoader yielding dicts with keys 'input_ids', 'labels', 'attention_mask', 'expression'
 #     """
 #     # 1) tokenizer
-#     tokenizer = scMulanTokenizer(meta_info['token_set'])
+#     tokenizer = MimyrTokenizer(meta_info['token_set'])
 #     tokenizer.add_special_tokens({'sep_token': meta_info.get('sep_token', '<SPToken1>')})
 #     tokenizer.pad_token = '<SPToken10>'
 
@@ -458,7 +458,10 @@ def get_generation_dataloader(
 #         pin_memory  = True,
 #     )
 
-def harmonize_dataset(adata, meta_info, coordfiles, organ='Brain', technology='M550', coord_suffix='_ccf', n_bins=100):
+def harmonize_dataset(adata, meta_info, coordfiles, organ='Brain', 
+                      technology='M550', coord_suffix='_ccf', 
+                      n_bins=100, overwrite_technology=False,
+                     ):
     if adata.X.max() > 10:
         # base_per_gene = 5  # tune (e.g., 5–50)
         # n_panel_genes = adata.shape[1]  # after your consistent filtering
@@ -480,7 +483,7 @@ def harmonize_dataset(adata, meta_info, coordfiles, organ='Brain', technology='M
             adata.obs[f'<{coord}>'] = bin_idxs
     if 'organ' not in adata.obs.columns:
         adata.obs['organ'] = organ
-    if 'technology' not in adata.obs.columns:
+    if 'technology' not in adata.obs.columns or overwrite_technology:
         adata.obs['technology'] = technology
     cols = ['<x>','<y>','<z>','organ', 'class', 'subclass','supertype','cluster', 'technology']
     mask = adata.obs[cols].notnull().all(axis=1)

@@ -26,18 +26,18 @@ from tqdm import tqdm
 from metrics import *
 from analysis import *
 
-from generative_transformer.utils.hf_tokenizer import scMulanTokenizer
-from generative_transformer.scMulan import (
+from generative_transformer.utils.hf_tokenizer import MimyrTokenizer
+from generative_transformer.Mimyr import (
     compute_global_bin_edges,
     generate_prompt_for_cg,
-    scMulan,
+    Mimyr,
     model_generate,
     model_inference,
 )
-import generative_transformer.scMulan as scMulan_module  # module handle if needed
+import generative_transformer.Mimyr as Mimyr_module  # module handle if needed
 from generative_transformer.model.model_kvcache import (
-    MulanConfig,
-    scMulanModel_kv as scMulanModel,
+    MimyrConfig,
+    MimyrModel_kv as MimyrModel,
 )
 
 class Inferernce:

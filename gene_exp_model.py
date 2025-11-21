@@ -14,9 +14,9 @@ from scipy.special import gamma
 from sklearn.neighbors import KernelDensity
 
 from generative_transformer import generate_prompt_for_cg
-from generative_transformer.scMulan import compute_global_bin_edges
-from generative_transformer.model.model import MulanConfig, scMulanModel
-from generative_transformer.utils.hf_tokenizer import scMulanTokenizer
+from generative_transformer.Mimyr import compute_global_bin_edges
+from generative_transformer.model.model import MimyrConfig, MimyrModel
+from generative_transformer.utils.hf_tokenizer import MimyrTokenizer
 
 class GeneExpModel(nn.Module):
     def __init__(self, slices, label="subclass"):

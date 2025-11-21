@@ -86,7 +86,7 @@ class Block(nn.Module):
 
 
 @dataclass
-class MulanConfig:
+class MimyrConfig:
     block_size: int = 1000
     vocab_size: int = 1011
     n_layer: int = 12
@@ -100,7 +100,7 @@ class MulanConfig:
     bin_edges: torch.Tensor = None
 
 
-class scMulanModel_kv(nn.Module):
+class MimyrModel_kv(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.vocab_size is not None
