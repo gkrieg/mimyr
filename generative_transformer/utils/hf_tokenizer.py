@@ -1,6 +1,6 @@
 from transformers import PreTrainedTokenizer
 
-class scMulanTokenizer(PreTrainedTokenizer):
+class MimyrTokenizer(PreTrainedTokenizer):
     def __init__(self, chars):
 
         self.chars = chars
