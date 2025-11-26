@@ -1,4 +1,4 @@
-![MIMYR Method](method.pdf)
+![MIMYR Method](method.jpg)
 
 
 
