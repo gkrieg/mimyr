@@ -1,6 +1,7 @@
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
+import zipfile
 
 import gdown
 
@@ -198,10 +199,14 @@ def main():
         os.makedirs(cfg["artifact_dir"], exist_ok=True)
 
     if not os.path.exists(cfg["data_dir"]):
-        raise NotImplementedError("Data download not implemented yet")
+        gdown.download(id="1iJX3z9S_biGCdpc-uQWwJyFImhv2mdU8", output="data.zip")
+        with zipfile.ZipFile("data.zip", 'r') as zip_ref:
+            zip_ref.extractall(".")
     
     if not os.path.exists("model_checkpoints"):
-        raise NotImplementedError("Model download not implemented yet")
+        gdown.download(id="1OSh5JfXg2OXVfTIyGR33PkvQYGNqFXLD", output="model_checkpoints.zip")
+        with zipfile.ZipFile("model_checkpoints.zip", 'r') as zip_ref:
+            zip_ref.extractall(".")
 
 
     slice_data_loader = SliceDataLoader(
