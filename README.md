@@ -1,3 +1,7 @@
+![MIMYR Method](method.pdf)
+
+
+
 # Overview of MIMYR
 
 MIMYR is a generative framework for spatial transcriptomics data reconstruction and imputation. The framework leverages deep learning to predict cellular locations, cell type classifications, and gene expression patterns in spatial transcriptomics data.
