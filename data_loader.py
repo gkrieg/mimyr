@@ -151,7 +151,7 @@ class SliceDataLoader:
 
         # CCF coordinate filtering
         df_ccf = pd.read_csv(
-            f"{self.config['data_dir']}/ccf-ABCA-{n}.csv"
+            f"{self.cfg['data_dir']}/ccf-ABCA-{n}.csv"
         ).set_index("cell_label")
         for i, slice in enumerate(slices2):
             df_filtered = df_ccf.loc[df_ccf.index.intersection(slice.obs_names)]
