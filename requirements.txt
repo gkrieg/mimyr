@@ -6,7 +6,6 @@ pandas==2.2.3
 # Machine Learning
 scikit-learn==1.5.2
 torch==2.9.1
-torchvision==0.16.2
 
 # Deep Learning utilities
 transformers==4.41.0
@@ -35,4 +34,4 @@ wandb==0.18.3
 # Utilities
 matplotlib==3.9.2
 seaborn==0.13.2
-
+gdown==5.2.0
