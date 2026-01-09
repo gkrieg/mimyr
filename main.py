@@ -5,11 +5,9 @@ import zipfile
 
 import gdown
 
-from models.diffusion_model import DDPMTrainer
-
-from models.celltype_model import CelltypeModel, SkeletonCelltypeModel
+from models.combined_model import CombinedModel
 from data_loader import SliceDataLoader
-from models.biological_model import BiologicalModel2
+from models.biological_model import KDEModelForGuidance
 import torch
 import numpy as np
 from inference import Inferernce
@@ -49,12 +47,22 @@ class TrainConfig:
     grad_clip: float = None
     ema_decay: float = 0.999
 
-
 # ----------------- argparse -----------------
 def get_args():
     parser = argparse.ArgumentParser(description="Run inference with config options.")
 
     # data / model paths
+    parser.add_argument(
+        "--run_mode", type=str, default="train", help="Mode for SliceDataLoader", choices=["train", "inference"]
+    )
+    parser.add_argument(
+        "--training_slice_directory", type=str, default="data/cleaned_versions", help="Training adata, if mode is set to train"
+    )
+    parser.add_argument(
+        "--val_slice_directory", type=str, default="data/cleaned_versions", help="Validation adata, if mode is set to train"
+    )
+
+
     parser.add_argument(
         "--data_mode", type=str, default="rq1", help="Mode for SliceDataLoader"
     )
@@ -86,7 +94,7 @@ def get_args():
     parser.add_argument(
         "--location_inference_type",
         type=str,
-        default="model",
+        default="skip",
         help="Type of location inference",
     )
     parser.add_argument(
@@ -102,7 +110,7 @@ def get_args():
     parser.add_argument(
         "--expression_inference_type",
         type=str,
-        default="model",
+        default="end",
         help="How to infer gene expression",
     )
 
@@ -141,13 +149,13 @@ def get_args():
     parser.add_argument(
         "--metric_sampling",
         type=int,
-        default=100,
+        default=1,
         help="Percentage of samples to use for metric computation",
     )
     parser.add_argument(
         "--out_csv",
         type=str,
-        default="results/debugging_rq3_spencer.csv",
+        default="results/debugging_cluster_model2.csv",
         help="Output CSV file path",
     )
     parser.add_argument(
@@ -219,28 +227,34 @@ def main():
     temp_test_slices = slice_data_loader.test_slices.copy()
     temp_ref_slices = slice_data_loader.reference_slices.copy()
 
+    artifact_dir = cfg['artifact_dir']
+
+    combined_model = CombinedModel(
+        location_model_checkpoint=args.location_model_checkpoint,
+        celltype_model_checkpoint=args.cluster_model_checkpoint,
+        gene_exp_model_checkpoint=args.expression_model_checkpoint,
+    )
+
+    if args.run_mode == "train":
+        combined_model.fit(args.training_slice_directory, args.val_slice_directory, cfg)
+        exit(0)
+
+
     for i, slice in enumerate(temp_test_slices):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        cfg["artifact_dir"] = f"{cfg['artifact_dir']}/{timestamp}"
+        cfg["artifact_dir"] = f"{artifact_dir}/{timestamp}"
         os.makedirs(cfg["artifact_dir"], exist_ok=True)
 
         slice_data_loader.test_slices = [slice]
 
         slice_data_loader.reference_slices = temp_ref_slices[
             2 * i : 2 * i + 2
-        ] 
+        ]
+        if len(slice_data_loader.reference_slices) == 0:
+            slice_data_loader.reference_slices = temp_ref_slices[-2:]
+
         cfg["slice_index"] = i
 
-        traincfg = TrainConfig()
-
-
-        trainer = DDPMTrainer(None, None, traincfg)
-        ckpt = torch.load(
-            cfg["location_model_checkpoint"],
-            map_location=trainer.device,
-        )
-        trainer.model.load_state_dict(ckpt["model"])
-        trainer.ema.shadow = ckpt["ema"]
 
         closest_ref_slice = np.argsort(
             [
@@ -264,25 +278,23 @@ def main():
             ][:, :2]
 
 
-        location_model = BiologicalModel2(
+        kdemodel = KDEModelForGuidance(
             [best_ref_slice], bandwidth=args.kde_bandwidth
         )
-        location_model.fit()
+        kdemodel.fit()
 
-        celltype_model = SkeletonCelltypeModel(5274, num_features=3)
-
-        celltype_model.load_model(args.cluster_model_checkpoint)
 
         if already_done(cfg, args.out_csv):
             print("skip", cfg)
             return
 
         inf = Inferernce(
-            (trainer, location_model),
-            celltype_model,
+            combined_model, 
+            kdemodel,
             slice_data_loader,
             copy.deepcopy(cfg),
         )
+
         pred = inf.run_inference(slice_data_loader.test_slices)
         print("Sending pred to evaluator...", pred)
         res = Evaluator(cfg).evaluate(

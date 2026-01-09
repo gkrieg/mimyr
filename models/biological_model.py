@@ -252,11 +252,11 @@ class KDEMixture(nn.Module):
         return base_points + noise
 
 
-class BiologicalModel2(nn.Module):
+class KDEModelForGuidance(nn.Module):
     def __init__(
         self, slices, z_posn=None, pin_key="region", bandwidth=0.001, z_factor=1
     ):
-        super(BiologicalModel2, self).__init__()
+        super(KDEModelForGuidance, self).__init__()
         self.bandwidth = bandwidth
         self.z_factor = z_factor
         try:

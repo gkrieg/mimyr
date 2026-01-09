@@ -427,7 +427,7 @@ class SkeletonCelltypeModel(nn.Module):
         return np.random.choice(len(probs), p=probs)
 
     def load_model(self, path):
-        self.model.load_state_dict(torch.load(path, map_location=self.device))
+        self.model.load_state_dict(torch.load(path, map_location=self.device, weights_only=False))
         self.model.to(self.device)
         print(f"📦 Loaded model weights from {path}")
 

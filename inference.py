@@ -21,11 +21,11 @@ from models.generative_transformer.Mimyr import (
 
 
 class Inferernce:
-    def __init__(self, location_model, subclass_model, slice_data_loader, config):
+    def __init__(self, combined_model, location_model, slice_data_loader, config):
         self.slice_data_loader = slice_data_loader
         self.token_mapping_model = slice_data_loader.gene_exp_model
-        self.location_model = location_model
-        self.subclass_model = subclass_model
+        self.location_model = (combined_model.trainer, location_model)
+        self.subclass_model = combined_model.celltype_model
         self.config = config
 
     # === LOCATION ===
@@ -248,6 +248,7 @@ class Inferernce:
                 outputs = []
                 for i in range(0, input_tensor.size(0), batch_size):
                     logits_batch = region_model.model(input_tensor[i : i + batch_size])
+                    # logits_batch = region_model.model(input_tensor[i : i + batch_size], xyz_tensor, torch.tensor(self.slice_data_loader.test_slices[0].obsm["knn_idx"][i : i + batch_size]).cuda())
                     outputs.append(logits_batch)
                 logits = torch.cat(outputs, dim=0)
 

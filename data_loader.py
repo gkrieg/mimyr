@@ -248,6 +248,8 @@ class SliceDataLoader:
         if self.mode == "rq1":
             slices = self.load_intra_slices()
             slices_tokenized = self._align_and_tokenize_slices(slices)
+            for sid, slice in enumerate(slices_tokenized):
+                slice.obs["slice_id"] = sid
 
             test_indices = [8, 16, 29, 34, 43]
             val_indices = [6, 28, 44, 14]
