@@ -54,7 +54,12 @@ pip install -r requirements.txt
 
 ## Running the Code
 
-The method consists of three main components: location modeling, cell type classification, and gene expression prediction. To run the full pipeline, use the following command:
+The pipeline consists of three components: location modeling, cell type classification, and gene expression prediction.
+
+The entry point is main.py, which supports two modes: inference and training, selected via a command-line argument.
+
+### Inference mode
+Use inference mode to reproduce the results in the paper. To run using inference mode, use the following command:
 ```bash
 python main.py
 ```
@@ -65,7 +70,18 @@ This will:
 3. Run inference using the pretrained models.
 4. Evaluate predictions and save results to CSV and artifact directories.
 
-### Command Line Arguments
+### Training Mode
+
+Training mode fine-tunes the model on a new tissue sample. It requires a directory of `.h5ad` files containing:
+
+- `obsm["aligned_spatial"]`: spatial (CCF) coordinates  
+- `obs["cluster"]`: cell-type or cluster labels  
+- `X`: gene expression matrix  
+
+After training, rerun `main.py` in inference mode using the newly saved checkpoints to generate predictions.
+
+
+### Other command Line Arguments
 
 You can customize the pipeline behavior using various command-line arguments:
 ```bash
