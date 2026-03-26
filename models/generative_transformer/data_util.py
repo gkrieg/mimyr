@@ -533,7 +533,7 @@ def harmonize_dataset(
     n_bins=100,
     overwrite_technology=False,
 ):
-    if adata.X.max() > 10:
+    if adata.n_obs > 0 and adata.n_vars > 0 and adata.X.max() > 10:
         # base_per_gene = 5  # tune (e.g., 5–50)
         # n_panel_genes = adata.shape[1]  # after your consistent filtering
         # panel_target = base_per_gene * n_panel_genes

@@ -9,6 +9,47 @@ from models.generative_transformer.data_util import harmonize_dataset
 import torch
 
 
+def _set_uniform_sampling_prob(adata, col="sampling_prob"):
+    """Set uniform per-cell sampling probabilities (dataloader will renormalize)."""
+    adata.obs[col] = np.full(adata.n_obs, 1.0, dtype=np.float64)
+
+
+def _rebalance_sampling_mass(
+    adata_train,
+    group_col="dataset_type",
+    sampling_col="sampling_prob",
+    target_fracs=None,
+    fill_missing_with=1.0,
+    eps=1e-12,
+):
+    """
+    Rescale sampling_prob so total probability mass per group matches target_fracs.
+    Relative weights within each group are preserved.
+    """
+    if sampling_col not in adata_train.obs.columns:
+        adata_train.obs[sampling_col] = fill_missing_with
+
+    p = adata_train.obs[sampling_col].astype(float).to_numpy()
+    p = np.nan_to_num(p, nan=fill_missing_with, posinf=fill_missing_with, neginf=0.0)
+    adata_train.obs[sampling_col] = p
+
+    if target_fracs is None:
+        groups = adata_train.obs[group_col].astype("category")
+        cats = [c for c in groups.cat.categories if (groups == c).any()]
+        target = {c: 1.0 / max(len(cats), 1) for c in cats}
+    else:
+        target = target_fracs
+
+    df = adata_train.obs[[group_col, sampling_col]].copy()
+    cur = df.groupby(group_col)[sampling_col].sum().to_dict()
+
+    scales = {g: t / max(cur.get(g, 0.0), eps) for g, t in target.items()}
+    gvals = adata_train.obs[group_col].to_numpy()
+    scale_vec = np.vectorize(lambda g: scales.get(g, 1.0))(gvals)
+    adata_train.obs[sampling_col] = adata_train.obs[sampling_col].to_numpy() * scale_vec
+    print("rebalanced sampling probs")
+
+
 class SliceDataLoader:
     def __init__(
         self,
@@ -200,7 +241,7 @@ class SliceDataLoader:
         overwrite_technology=False,
     ):
         """Helper method to harmonize all slice lists with metadata."""
-        meta_info = torch.load(f'{self.metadata_dir}{self.cfg["meta_info"]}')
+        meta_info = torch.load(os.path.join(self.metadata_dir, self.cfg["meta_info"]))
         edges = [
             f"{self.metadata_dir}edges_x.pkl",
             f"{self.metadata_dir}edges_y.pkl",
@@ -244,7 +285,124 @@ class SliceDataLoader:
         self.fine_tune_val_slices = None
         self.fine_tune_test_slices = None
 
-    def prepare(self):
+    def _build_adata(
+        self,
+        adata2_path=None,
+        gene_set=None,
+        seed=0,
+        dummy=False,
+        sampling_col="sampling_prob",
+        output_dir=None,
+        rank=0,
+    ):
+        """
+        Concatenate train/val slices into self.adata_train / self.adata_val.
+        If adata2_path is provided, load and merge it into the training set.
+        """
+        adata_train = (
+            sc.concat(self.train_slices, join="outer")
+            if len(self.train_slices) > 1
+            else self.train_slices[0].copy()
+        )
+        adata_train.obs_names_make_unique()
+
+        adata_val = (
+            sc.concat(self.val_slices, join="outer")
+            if len(self.val_slices) > 1
+            else self.val_slices[0].copy()
+        )
+        adata_val.obs_names_make_unique()
+
+        if adata2_path is not None:
+            if output_dir is not None:
+                train_path = os.path.join(output_dir, "train.h5ad")
+                if os.path.exists(train_path):
+                    print(f"Found existing {train_path}, loading instead of rebuilding...")
+                    self.adata_train = sc.read_h5ad(train_path)
+                    self.adata_val = adata_val
+                    return
+
+            rng = np.random.default_rng(seed=seed)
+            adata2 = sc.read_h5ad(adata2_path)
+            adata2.var_names_make_unique()
+            if gene_set is not None:
+                adata2._inplace_subset_var(gene_set)
+            if dummy:
+                adata2._inplace_subset_obs(adata2.obs_names[:100])
+                print("using only first 100 cells from adata2")
+            print(adata2)
+
+            n_val_req = adata_val.n_obs
+            n_train_req = adata_train.n_obs
+            n_total = adata2.n_obs
+
+            n_val = min(n_val_req, n_total)
+            n_train = min(n_train_req, n_total - n_val)
+
+            all_idx = np.arange(n_total)
+            idx_val = (
+                rng.choice(all_idx, size=n_val, replace=False)
+                if n_val > 0
+                else np.array([], dtype=int)
+            )
+            mask_val = np.zeros(n_total, dtype=bool)
+            mask_val[idx_val] = True
+            remain = np.flatnonzero(~mask_val)
+            idx_train = (
+                rng.choice(remain, size=n_train, replace=False)
+                if n_train > 0
+                else np.array([], dtype=int)
+            )
+
+            adata2_val = adata2[idx_val].copy()
+            adata2._inplace_subset_obs(idx_train)
+            adata2_train = adata2
+
+            adata2_train.obs_names_make_unique()
+            adata2_val.obs_names_make_unique()
+            adata_train.obs_names_make_unique()
+
+            print(
+                f"Requested: train={n_train_req}, val={n_val_req}; "
+                f"Allocated: train={n_train}, val={n_val} (total available={n_total})"
+            )
+
+            _set_uniform_sampling_prob(adata2_train, col=sampling_col)
+
+            adata_train = sc.concat(
+                [adata_train, adata2_train],
+                join="outer",
+                label="dataset_type",
+                keys=["st", "scrna"],
+            )
+
+            _rebalance_sampling_mass(
+                adata_train,
+                group_col="dataset_type",
+                sampling_col=sampling_col,
+                target_fracs={"st": 0.7, "scrna": 0.3},
+            )
+            print(adata_train)
+
+            if output_dir is not None and rank == 0:
+                adata_train.write(os.path.join(output_dir, "train.h5ad"))
+
+        self.adata_train = adata_train
+        self.adata_val = adata_val
+        # Free per-slice objects now that they are concatenated into adata_train/adata_val
+        self.train_slices = None
+        self.val_slices = None
+
+    def prepare(
+        self,
+        adata2_path=None,
+        gene_set=None,
+        seed=0,
+        dummy=False,
+        sampling_col="sampling_prob",
+        output_dir=None,
+        rank=0,
+    ):
         if self.mode == "rq1":
             slices = self.load_intra_slices()
             slices_tokenized = self._align_and_tokenize_slices(slices)
@@ -419,6 +577,31 @@ class SliceDataLoader:
                 train_slices, val_slices, test_slices, reference_slices
             )
 
+        elif self.mode == "rq3_v2":
+            slices = self.load_zhuangn_slices(n=2)
+            slices_tokenized = self._align_and_tokenize_slices(slices)
+
+            test_indices = [1, 10, 20, 30, 40]
+            val_indices = [44]
+
+            test_slices = [slices_tokenized[i] for i in test_indices]
+            val_slices = [slices_tokenized[i] for i in val_indices]
+
+            train_indices = [5, 15, 25, 35]
+            train_slices = [slices_tokenized[i] for i in train_indices]
+
+            ref_indices = [5, 5, 5, 15, 15, 25, 25, 35, 35, 44]
+            reference_slices = [slices_tokenized[i] for i in ref_indices]
+
+            train_slices, val_slices, test_slices, reference_slices = (
+                self._harmonize_slice_lists(
+                    train_slices, val_slices, test_slices, reference_slices
+                )
+            )
+            self._set_slice_attributes(
+                train_slices, val_slices, test_slices, reference_slices
+            )
+
         elif self.mode == "rq4":
             slices = self.load_zhuangn_slices(n=3, remove_edges=False)
             slices_tokenized = self._align_and_tokenize_slices(slices)
@@ -472,10 +655,24 @@ class SliceDataLoader:
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
 
+        if dummy:
+            self.train_slices = [s[s.obs_names[:500]] for s in self.train_slices]
+            self.val_slices = [s[s.obs_names[:100]] for s in self.val_slices]
+
+        self._build_adata(
+            adata2_path=adata2_path,
+            gene_set=gene_set,
+            seed=seed,
+            dummy=dummy,
+            sampling_col=sampling_col,
+            output_dir=output_dir,
+            rank=rank,
+        )
+
         # Print summary
         print(f"Prepared data:")
-        print(f" - Train: {len(self.train_slices)} slices")
-        print(f" - Val: {len(self.val_slices)} slices")
+        print(f" - Train: {len(self.train_slices) if self.train_slices is not None else 'N/A (freed)'} slices")
+        print(f" - Val: {len(self.val_slices) if self.val_slices is not None else 'N/A (freed)'} slices")
         print(f" - Test: {len(self.test_slices)} slices")
         if self.fine_tune_train_slices is not None:
             print(f" - Fine-tune Train: {len(self.fine_tune_train_slices)} slices")

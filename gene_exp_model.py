@@ -17,7 +17,7 @@ class GeneExpModel(nn.Module):
         try:
             self.id_to_subclass = pkl.load(
                 open(
-                    "id_to_subclass.pkl",
+                    "data/id_to_subclass.pkl",
                     "rb",
                 )
             )
@@ -77,6 +77,6 @@ class GeneExpModel(nn.Module):
         slices_new = []
         c = 0
         for slice in self.slices:
-            slices_new.append(self.concatenated_slices[c : c + len(slice)])
+            slices_new.append(self.concatenated_slices[c : c + len(slice)].copy())
             c += len(slice)
         return slices_new

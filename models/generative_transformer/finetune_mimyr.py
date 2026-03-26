@@ -23,10 +23,10 @@ import pandas as pd
 from anndata import AnnData
 
 
-from model.model import MimyrConfig, MimyrModel
-from utils.hf_tokenizer import MimyrTokenizer
-from data_util import get_generation_dataloader, harmonize_dataset, summarize_sample_ddp
-from Mimyr import tokens_and_vals_to_expression_row
+from .model.model import MimyrConfig, MimyrModel
+from .utils.hf_tokenizer import MimyrTokenizer
+from .data_util import get_generation_dataloader, harmonize_dataset, summarize_sample_ddp
+from .Mimyr import tokens_and_vals_to_expression_row
 
 from scipy.stats import pearsonr
 import numpy as np
@@ -61,6 +61,47 @@ def load_sampling_metadata_csv(
             m = adata.obs.index.isin(df.index) & adata.obs[c].isna()
             adata.obs.loc[m, c] = df.loc[adata.obs.index[m], c].values
     print(f"Merged {list(df.columns)} for {df.shape[0]} cells from {path}")
+
+
+def rebalance_sampling_mass(
+    adata_train,
+    group_col="dataset_type",
+    sampling_col="sampling_prob",
+    target_fracs=None,
+    fill_missing_with=1.0,
+    eps=1e-12,
+):
+    """
+    Rescales sampling_prob so that total probability mass per group matches target_fracs.
+    Keeps relative weights within each group unchanged.
+    """
+    if sampling_col not in adata_train.obs.columns:
+        adata_train.obs[sampling_col] = fill_missing_with
+
+    p = adata_train.obs[sampling_col].astype(float).to_numpy()
+    p = np.nan_to_num(p, nan=fill_missing_with, posinf=fill_missing_with, neginf=0.0)
+    adata_train.obs[sampling_col] = p
+
+    if target_fracs is None:
+        groups = adata_train.obs[group_col].astype("category")
+        cats = [c for c in groups.cat.categories if (groups == c).any()]
+        target = {c: 1.0 / max(len(cats), 1) for c in cats}
+    else:
+        target = target_fracs
+
+    df = adata_train.obs[[group_col, sampling_col]].copy()
+    cur = df.groupby(group_col)[sampling_col].sum().to_dict()
+
+    scales = {}
+    for g, t in target.items():
+        m = max(cur.get(g, 0.0), eps)
+        scales[g] = t / m
+
+    gvals = adata_train.obs[group_col].to_numpy()
+    scale_vec = np.vectorize(lambda g: scales.get(g, 1.0))(gvals)
+    adata_train.obs[sampling_col] = adata_train.obs[sampling_col].to_numpy() * scale_vec
+    print("rebalanced sampling probs")
+    return scales
 
 
 def evaluate_expression_correlation(
@@ -321,57 +362,7 @@ def evaluate_expression_metrics(
     return pearson_rs, f1s, precisions, recalls
 
 
-def rebalance_sampling_mass(
-    adata_train,
-    group_col="dataset_type",  # expects values like 'st' and 'scrna'
-    sampling_col="sampling_prob",
-    target_fracs=None,  # e.g., {'st': 0.5, 'scrna': 0.5}
-    fill_missing_with=1.0,  # create uniform weights where missing
-    eps=1e-12,
-):
-    """
-    Rescales sampling_prob so that total probability mass per group matches target_fracs.
-    Keeps relative weights *within* each group unchanged.
-    """
-    import numpy as np
-    import pandas as pd
-
-    if sampling_col not in adata_train.obs.columns:
-        adata_train.obs[sampling_col] = fill_missing_with
-
-    # fill NaNs or non-finite
-    p = adata_train.obs[sampling_col].astype(float).to_numpy()
-    p = np.nan_to_num(p, nan=fill_missing_with, posinf=fill_missing_with, neginf=0.0)
-    adata_train.obs[sampling_col] = p
-
-    # If no targets provided, split equally across present groups
-    if target_fracs is None:
-        groups = adata_train.obs[group_col].astype("category")
-        cats = [c for c in groups.cat.categories if (groups == c).any()]
-        target = {c: 1.0 / max(len(cats), 1) for c in cats}
-    else:
-        target = target_fracs
-
-    # current mass per group
-    df = adata_train.obs[[group_col, sampling_col]].copy()
-    cur = df.groupby(group_col)[sampling_col].sum().to_dict()
-
-    # rescale per group: p_i <- p_i * (target_frac / current_mass)
-    scales = {}
-    for g, t in target.items():
-        m = max(cur.get(g, 0.0), eps)
-        scales[g] = t / m
-
-    gvals = adata_train.obs[group_col].to_numpy()
-    scale_vec = np.vectorize(lambda g: scales.get(g, 1.0))(gvals)
-    adata_train.obs[sampling_col] = adata_train.obs[sampling_col].to_numpy() * scale_vec
-    print("rebalanced sampling probs")
-
-    # (optional) final global normalization is done inside the dataloader anyway
-    return scales
-
-
-def main():
+def get_parser():
     parser = argparse.ArgumentParser(
         description="Fine-tune MimyrModel on conditional generation with coords + validation"
     )
@@ -385,7 +376,22 @@ def main():
         help="Path to meta_info.pt from pretraining",
     )
     parser.add_argument(
-        "--adata", type=str, required=True, help="Path to input AnnData .h5ad file"
+        "--data-mode",
+        type=str,
+        required=True,
+        help="Data mode to pass to SliceDataLoader (e.g. 'rq1', 'rq2', 'rq3', 'rq4', 'rq5')",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        required=True,
+        help="Root directory containing the .h5ad data files",
+    )
+    parser.add_argument(
+        "--data-label",
+        type=str,
+        default="cluster",
+        help="Cell-type label column to use in SliceDataLoader (default: 'cluster')",
     )
     parser.add_argument(
         "--adata2",
@@ -432,12 +438,6 @@ def main():
         help="Weight on expression MSE loss term",
     )
     parser.add_argument(
-        "--val-split",
-        type=float,
-        default=0.1,
-        help="Fraction of cells to hold out for validation (0 disables)",
-    )
-    parser.add_argument(
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
@@ -466,21 +466,6 @@ def main():
         help="Whether to add noise to x,y,z coordinates during training",
     )
     parser.add_argument(
-        "--slice-nums",
-        nargs="+",
-        type=str,
-        default=None,
-        help="List of slice IDs for spatial mouse brain atlases",
-    )
-    parser.add_argument(
-        "--val-slice-nums",
-        nargs="+",
-        type=int,
-        default=None,
-        help="List of slice IDs to use for validation. If provided, we split by slices: "
-        "val = these slices; train = --slice-nums (if provided) or all other slices present.",
-    )
-    parser.add_argument(
         "--dummy", action="store_true", help="Whether to use small dummy dataset"
     )
     parser.add_argument(
@@ -491,35 +476,20 @@ def main():
         help="Model size to initialize if no checkpoint is provided",
     )
     parser.add_argument(
-        "--slice-prefix",
-        type=str,
-        default="C57BL6J-638850.",
-        help="obs prefix for the slice nums",
-    )
-    parser.add_argument(
         "--metadata-dir",
         type=str,
         default="/work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata/",
-        help="obs prefix for the slice nums",
-    )
-    parser.add_argument(
-        "--harmonize-dataset",
-        action="store_true",
-        help="Whether to add all gene tokens and normalize",
-    )
-    parser.add_argument(
-        "--technology", type=str, default="M500", help="technology of data"
-    )
-    parser.add_argument(
-        "--coord-suffix",
-        type=str,
-        default="_ccf",
-        help="suffix in .obs for CCF coordinates",
+        help="Directory containing metadata files (edges, meta_info) for harmonization",
     )
     parser.add_argument(
         "--disable-sampling-probs",
         action="store_true",
         help="Ignore adata.obs[sampling_col] even if present (uniform sampling).",
+    )
+    parser.add_argument(
+        "--rebalance-only",
+        action="store_true",
+        help="Ignore CSV weights; set uniform per-cell weights then rebalance dataset mass across groups (st vs scrna).",
     )
     parser.add_argument(
         "--sampling-col",
@@ -547,11 +517,13 @@ def main():
         help="bin_edges file for gene expression binning",
     )
 
-    args = parser.parse_args()
+    return parser
 
+
+def train(args):
     os.makedirs(args.output_dir, exist_ok=True)
     os.environ["NCCL_P2P_DISABLE"] = "1"
-    if dist.is_available() and int(os.environ.get("WORLD_SIZE", 1)) > 1:
+    if dist.is_available() and int(os.environ.get("WORLD_SIZE", 1)) > 1 and not dist.is_initialized():
         dist.init_process_group(backend="nccl")
 
     if dist.is_available() and dist.is_initialized():
@@ -643,235 +615,47 @@ def main():
 
     print("initialized model", flush=True)
 
-    # 4) Load AnnData ONCE
+    # 4) Load train/val AnnData from data_loader
+    from data_loader import SliceDataLoader
 
-    def _set_uniform_sampling_prob(adata_like, col="sampling_prob"):
-        """Add a uniform per-cell sampling probability (sum doesn't need to be 1)."""
-        import numpy as np
+    cfg = {
+        "data_dir": args.data_dir,
+        "meta_info": os.path.basename(args.meta_info),
+    }
+    slice_loader = SliceDataLoader(
+        mode=args.data_mode,
+        label=args.data_label,
+        cfg=cfg,
+        metadata_dir=args.metadata_dir,
+    )
+    slice_loader.prepare(
+        adata2_path=args.adata2,
+        gene_set=meta_info.get("gene_set"),
+        seed=args.seed,
+        dummy=args.dummy,
+        sampling_col=args.sampling_col,
+        output_dir=args.output_dir,
+        rank=rank,
+    )
 
-        adata_like.obs[col] = np.full(
-            adata_like.n_obs, 1.0, dtype=np.float64
-        )  # loader will renormalize
-
-    adata = sc.read_h5ad(args.adata)
-    args.use_sampling_probs = not args.disable_sampling_probs
-    if args.use_sampling_probs:
-        load_sampling_metadata_csv(adata, "train_adata_sampling.csv.gz", overwrite=True)
-
-    if args.harmonize_dataset:
-        coord_files = [
-            f"{args.metadata_dir}edges_x.pkl",
-            f"{args.metadata_dir}edges_y.pkl",
-            f"{args.metadata_dir}edges_z.pkl",
-        ]
-        adata = harmonize_dataset(
-            adata,
-            meta_info,
-            coord_files,
-            technology=args.technology,
-            coord_suffix=args.coord_suffix,
-        )
-
-    if args.slice_nums is not None and args.val_slice_nums is None:
-        slice_names_train = [f"{args.slice_prefix}{s}" for s in args.slice_nums]
-        adata._inplace_subset_obs(
-            adata.obs["brain_section_label"].isin(slice_names_train)
-        )
-        print(
-            f"Subsetted adata to only contain train slices {args.slice_nums} → {adata}"
-        )
-
-    if args.dummy:
-        adata._inplace_subset_obs(adata.obs_names[:100])
-        print("using only first 100 cells")
-
-    # -----------------------------
-    # NEW: version 1 — slice-based split if --val-slice-nums is provided
-    # -----------------------------
-    if args.val_slice_nums is not None:
-        # Build slice name sets
-        val_slice_names = [f"{args.slice_prefix}{s}" for s in args.val_slice_nums]
-        if args.slice_nums is not None:
-            train_slice_names = [f"{args.slice_prefix}{s}" for s in args.slice_nums]
-        else:
-            train_slice_names = []  # use all other slices not in val
-
-        # Compute union so we subset once, then do minimal copies
-        union_names = sorted(set(train_slice_names) | set(val_slice_names))
-        if len(union_names) > 0:
-            mask_union = adata.obs["brain_section_label"].isin(union_names)
-            adata._inplace_subset_obs(mask_union)
-            print(f"Kept only union(train, val) slices → {adata}")
-
-        # Now determine masks within this subset
-        val_mask = adata.obs["brain_section_label"].isin(val_slice_names)
-        if len(train_slice_names) > 0:
-            train_mask = adata.obs["brain_section_label"].isin(train_slice_names)
-        else:
-            train_mask = ~val_mask  # everything else is train
-
-        # Copy out val; in-place subset for train (minimize copies)
-        adata_val = adata[val_mask].copy()
-        adata._inplace_subset_obs(train_mask)
-        adata_train = adata
-
-        # If a second AnnData is provided, split it to match train/val counts and then concatenate
-        if args.adata2 is not None:
-            train_path = os.path.join(args.output_dir, "train.h5ad")
-
-            if os.path.exists(train_path):
-                print(f"Found existing {train_path}, loading instead of rebuilding...")
-                adata_train = sc.read_h5ad(train_path)
-            else:
-                rng = np.random.default_rng(seed=getattr(args, "seed", None))
-                adata2 = sc.read_h5ad(args.adata2)
-                adata2.var_names_make_unique()
-                gene_set = meta_info["gene_set"]
-                adata2._inplace_subset_var(gene_set)
-                if args.dummy:
-                    adata2._inplace_subset_obs(adata2.obs_names[:100])
-                    print("using only first 100 cells")
-
-                print(adata2)
-
-                # requested sizes
-                n_val_req = adata_val.n_obs
-                n_train_req = adata_train.n_obs
-
-                n_total = adata2.n_obs
-
-                # 1) allocate what you can: val first, train from the remainder
-                n_val = min(n_val_req, n_total)
-                n_train = min(n_train_req, n_total - n_val)
-
-                # 2) sample indices (no replacement)
-                all_idx = np.arange(n_total)
-                idx_val = (
-                    rng.choice(all_idx, size=n_val, replace=False)
-                    if n_val > 0
-                    else np.array([], dtype=int)
-                )
-
-                mask_val = np.zeros(n_total, dtype=bool)
-                mask_val[idx_val] = True
-                remain = np.flatnonzero(~mask_val)
-
-                idx_train = (
-                    rng.choice(remain, size=n_train, replace=False)
-                    if n_train > 0
-                    else np.array([], dtype=int)
-                )
-
-                # 3) build splits: make val as a separate object, keep train in-place
-                adata2_val = adata2[idx_val].copy()  # new object for validation
-                adata2._inplace_subset_obs(
-                    idx_train
-                )  # in-place: adata2 becomes the train split
-                adata2_train = adata2
-
-                # (optional) housekeeping
-                adata2_train.obs_names_make_unique()
-                adata2_val.obs_names_make_unique()
-                adata_train.obs_names_make_unique()
-
-                print(
-                    f"Requested: train={n_train_req}, val={n_val_req}; "
-                    f"Allocated: train={n_train}, val={n_val} (total available={n_total})"
-                )
-
-                _set_uniform_sampling_prob(adata2_train, col="sampling_prob")
-
-                # Concatenate each split separately
-                adata_train = sc.concat(
-                    [adata_train, adata2_train],
-                    join="outer",
-                    label="dataset_type",
-                    keys=["st", "scrna"],
-                )
-
-                # Ensure both sides have a weight column (ad2 got 1.0 earlier)
-                rebalance_sampling_mass(
-                    adata_train,
-                    group_col="dataset_type",
-                    sampling_col=args.sampling_col,  # 'sampling_prob'
-                    target_fracs={
-                        "st": 0.7,
-                        "scrna": 0.3,
-                    },  # change if you want a different mix
-                )
-                print(adata_train)
-                train_path = os.path.join(args.output_dir, "train.h5ad")
-                if rank == 0:
-                    adata_train.write(train_path)
-
-    # -----------------------------
-    # version 2 — random split if --val-slice-nums is NOT provided
-    # (same behavior as before, but now we also save obs_names)
-    # -----------------------------
-    else:
-        n_cells = adata.n_obs
-        if args.val_split > 0:
-            idxs = np.arange(n_cells)
-            np.random.shuffle(idxs)
-            n_val = int(n_cells * args.val_split)
-            val_idxs, train_idxs = idxs[:n_val], idxs[n_val:]
-
-            # Make a tiny, independent copy only for the validation set
-            adata_val = adata[val_idxs].copy()
-
-            # Train: inplace subset (no full copy)
-            adata._inplace_subset_obs(~adata.obs_names.isin(adata.obs_names[val_idxs]))
-            adata_train = adata
-
-            # If a second AnnData is provided, match counts and concatenate like before
-            if args.adata2 is not None:
-                adata2 = sc.read_h5ad(args.adata2)
-                num_adata_cells = len(
-                    adata_train.obs_names
-                )  # + len(adata_val.obs_names)
-                if num_adata_cells > adata2.n_obs:
-                    raise ValueError(
-                        f"adata2 only has {adata2.n_obs} cells, cannot match {num_adata_cells}"
-                    )
-
-                rng = np.random.default_rng(seed=getattr(args, "seed", None))
-                # sample total, then split sampled into train/val sizes
-                total_idx = rng.choice(
-                    adata2.n_obs, size=num_adata_cells, replace=False
-                )
-                n_train = adata_train.n_obs
-                idx_train2 = total_idx[:n_train]
-                # idx_val2   = total_idx[n_train:]
-                adata2._inplace_subset_obs(idx_train2)
-
-                adata2_train = adata2
-                # adata2_val   = adata2[idx_val2].copy()
-                _set_uniform_sampling_prob(adata2_train, col="sampling_prob")
-
-                adata_train = adata_train.concatenate(
-                    adata2_train,
-                    join="outer",
-                    batch_key="dataset_type",
-                    batch_categories=["st", "scrna"],
-                )
-                # adata_val = adata_val.concatenate(
-                # adata2_val, join='outer',
-                # batch_key='dataset_type', batch_categories=['st', 'scrna']
-                # )
-
-            # Save obs_names so you can reuse them later
-            train_obs_path = os.path.join(args.output_dir, "train_obs.txt")
-            val_obs_path = os.path.join(args.output_dir, "val_obs.txt")
-            np.savetxt(train_obs_path, adata_train.obs_names.to_numpy(), fmt="%s")
-            np.savetxt(val_obs_path, adata_val.obs_names.to_numpy(), fmt="%s")
-            print(f"Saved train obs_names → {train_obs_path}")
-            print(f"Saved val   obs_names → {val_obs_path}")
-
-        else:
-            adata_train = adata
-            adata_val = None
+    adata_train = slice_loader.adata_train
+    adata_val = slice_loader.adata_val
 
     args.use_sampling_probs = not args.disable_sampling_probs
+    if args.rebalance_only:
+        print("Mode: --rebalance-only. Using uniform per-cell weights then rebalancing dataset mass.")
+        adata_train.obs[args.sampling_col] = 1.0
+        args.use_sampling_probs = True
+        if "dataset_type" in adata_train.obs.columns:
+            rebalance_sampling_mass(
+                adata_train,
+                group_col="dataset_type",
+                sampling_col=args.sampling_col,
+                target_fracs={"st": 0.7, "scrna": 0.3},
+            )
+    elif args.use_sampling_probs:
+        load_sampling_metadata_csv(adata_train, "train_adata_sampling.csv.gz", overwrite=True)
+
     use_probs_val = False  # usually evaluate uniformly
 
     # Optional: if you want to limit rows per epoch, pass args.epoch_samples if you have it
@@ -941,7 +725,6 @@ def main():
                 "batch_size": args.batch_size,
                 "lr": args.lr,
                 "lambda_val": args.lambda_val,
-                "val_split": args.val_split,
             },
             dir=args.output_dir,
         )
@@ -1191,6 +974,10 @@ def main():
     if rank == 0:
         wandb.finish()
     dist.destroy_process_group()
+
+
+def main():
+    train(get_parser().parse_args())
 
 
 if __name__ == "__main__":

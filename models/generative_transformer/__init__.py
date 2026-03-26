@@ -4,3 +4,4 @@ from .utils.hf_tokenizer import MimyrTokenizer
 from .Mimyr import model_inference, model_generate, tokens_and_vals_to_expression_row
 from .Mimyr import fine_tuning, generate_prompt_for_cg
 from .reference.GeneSymbolUniform.pyGSUni import GeneSymbolUniform
+from .finetune_mimyr import train as train_expression_model, get_parser as get_expression_parser

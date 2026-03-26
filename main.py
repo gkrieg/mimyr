@@ -53,13 +53,17 @@ def get_args():
 
     # data / model paths
     parser.add_argument(
-        "--run_mode", type=str, default="train", help="Mode for SliceDataLoader", choices=["train", "inference"]
+        "--run_mode", type=str, default="inference", help="Mode for SliceDataLoader", choices=["train", "inference"]
     )
     parser.add_argument(
         "--training_slice_directory", type=str, default="data/cleaned_versions", help="Training adata, if mode is set to train"
     )
     parser.add_argument(
         "--val_slice_directory", type=str, default="data/cleaned_versions", help="Validation adata, if mode is set to train"
+    )
+    parser.add_argument(
+        "--skip_combined_fit", action="store_true",
+        help="Skip combined_model.fit() (location/celltype training) and go straight to expression model training",
     )
 
 
@@ -179,6 +183,80 @@ def get_args():
         help="Directory to save artifacts",
     )
 
+    # Expression model training args (used when --run_mode train)
+    parser.add_argument(
+        "--expression_output_dir",
+        type=str,
+        default="model_checkpoints/expression_finetuned",
+        help="Directory to save the finetuned expression model",
+    )
+    parser.add_argument(
+        "--expression_epochs", type=int, default=5,
+        help="Number of fine-tuning epochs for the expression model",
+    )
+    parser.add_argument(
+        "--expression_batch_size", type=int, default=8,
+        help="Batch size for expression model training",
+    )
+    parser.add_argument(
+        "--expression_lr", type=float, default=5e-5,
+        help="Learning rate for expression model training",
+    )
+    parser.add_argument(
+        "--expression_lambda_val", type=float, default=1.0,
+        help="Weight on the expression MSE loss term",
+    )
+    parser.add_argument(
+        "--expression_max_len", type=int, default=512,
+        help="Max sequence length for prompts + genes",
+    )
+    parser.add_argument(
+        "--expression_save_frequency", type=int, default=10,
+        help="Number of epochs between expression model checkpoints",
+    )
+    parser.add_argument(
+        "--expression_epoch_samples", type=int, default=-1,
+        help="Rows to draw per epoch for expression training (-1 uses full dataset)",
+    )
+    parser.add_argument(
+        "--expression_log_per_steps", type=int, default=100,
+        help="Log to W&B every this many steps during expression training",
+    )
+    parser.add_argument(
+        "--expression_new_expression_size", type=int, default=None,
+        help="Override n_expression_level in the expression model",
+    )
+    parser.add_argument(
+        "--expression_no_shuffle", action="store_true",
+        help="Disable DataLoader shuffling for expression training",
+    )
+    parser.add_argument(
+        "--expression_xyz_noise", action="store_true",
+        help="Add noise to x,y,z coordinates during expression model training",
+    )
+    parser.add_argument(
+        "--expression_adata2", type=str, default=None,
+        help="Optional path to a second .h5ad file (e.g. scRNA-seq) to merge into training",
+    )
+    parser.add_argument(
+        "--expression_metadata_dir", type=str,
+        default="/work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata/",
+        help="Directory containing metadata files used by the expression model",
+    )
+    parser.add_argument(
+        "--expression_from_finetuned", action="store_true",
+        help="Indicate that the expression checkpoint is already finetuned (affects weight loading)",
+    )
+    parser.add_argument(
+        "--expression_model_size", type=str, default=None,
+        choices=["small", "medium", "large"],
+        help="Model size to initialise from scratch if no expression checkpoint is provided",
+    )
+    parser.add_argument(
+        "--expression_rebalance_only", action="store_true",
+        help="Ignore CSV weights; use uniform per-cell weights then rebalance mass across st/scrna groups",
+    )
+
     return parser.parse_args()
 
 
@@ -220,12 +298,13 @@ def main():
     slice_data_loader = SliceDataLoader(
         mode=args.data_mode, label=args.data_label, cfg=copy.deepcopy(cfg)
     )
-    slice_data_loader.prepare()
 
     cfg["full_gene_panel"] = True
 
-    temp_test_slices = slice_data_loader.test_slices.copy()
-    temp_ref_slices = slice_data_loader.reference_slices.copy()
+    if args.run_mode != "train":
+        slice_data_loader.prepare()
+        temp_test_slices = slice_data_loader.test_slices.copy()
+        temp_ref_slices = slice_data_loader.reference_slices.copy()
 
     artifact_dir = cfg['artifact_dir']
 
@@ -236,7 +315,67 @@ def main():
     )
 
     if args.run_mode == "train":
-        combined_model.fit(args.training_slice_directory, args.val_slice_directory, cfg)
+        import torch.distributed as _dist
+        os.environ["NCCL_P2P_DISABLE"] = "1"
+        if _dist.is_available() and int(os.environ.get("WORLD_SIZE", 1)) > 1:
+            _dist.init_process_group(backend="nccl")
+            _rank = _dist.get_rank()
+            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        else:
+            _rank = 0
+
+        if _rank == 0 and not args.skip_combined_fit:
+            combined_model.fit(args.training_slice_directory, args.val_slice_directory, cfg)
+
+        if _dist.is_available() and _dist.is_initialized():
+            _dist.barrier()
+
+        # Train the gene expression module via finetune_mimyr
+        from models.generative_transformer import train_expression_model as _train_expression_model
+        import argparse as _argparse
+
+        expr_args = _argparse.Namespace(
+            # paths / identity
+            ckp_path=args.expression_model_checkpoint,
+            meta_info=os.path.join(args.data_dir, args.meta_info),
+            output_dir=args.expression_output_dir,
+            # data
+            data_mode=args.data_mode,
+            data_label=args.data_label,
+            data_dir=args.data_dir,
+            adata2=args.expression_adata2,
+            metadata_dir=args.expression_metadata_dir,
+            # training hyperparams
+            epochs=args.expression_epochs,
+            batch_size=args.expression_batch_size,
+            lr=args.expression_lr,
+            device=args.device,
+            lambda_val=args.expression_lambda_val,
+            max_len=args.expression_max_len,
+            no_shuffle=args.expression_no_shuffle,
+            num_workers=4,
+            save_frequency=args.expression_save_frequency,
+            xyz_noise=args.expression_xyz_noise,
+            epoch_samples=args.expression_epoch_samples,
+            seed=42,
+            log_per_steps=args.expression_log_per_steps,
+            bin_edges_file=None,
+            # model init
+            from_finetuned=args.expression_from_finetuned,
+            model_size=args.expression_model_size,
+            overwrite_vocab_size=None,
+            new_expression_size=args.expression_new_expression_size,
+            # sampling
+            disable_sampling_probs=True,
+            use_sampling_probs=False,
+            sampling_col="sampling_prob",
+            # misc
+            dummy=False,
+            kv_cache=False,
+            val_split=0.0,  # data is pre-split by SliceDataLoader; this is informational only
+            rebalance_only=args.expression_rebalance_only,
+        )
+        _train_expression_model(expr_args)
         exit(0)
 
 
@@ -322,7 +461,7 @@ def main():
             pkl.dump(pred, f)
 
         # delete all local variables and collect garbage
-        del pred, trainer, location_model, celltype_model, inf
+        del pred, inf
         torch.cuda.empty_cache()
         gc.collect()
 
