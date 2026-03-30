@@ -15,3 +15,16 @@ artifacts
 plot_creator.ipynb
 plots
 main.ipynb
+
+# SLURM job output logs
+Eval-*.txt
+TG_base-*.txt
+models/rq3_finetune-*.txt
+models/rq4_finetune-*.txt
+
+# Binary artifacts
+*.zip
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/

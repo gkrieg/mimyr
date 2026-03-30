@@ -1,0 +1,38 @@
+# Base expression model training (rq1)
+# =====================================
+# Usage: torchrun --nproc_per_node=3 --master_port $port main.py --config configs/train_base.yaml
+
+# --- Paths ---
+data_dir: /work/magroup/skrieger/tissue_generator/quantized_slices
+zhuang_data_dir: /work/magroup/skrieger/MERFISH_BICCN/processed_data
+diseased_data_dir: /work/magroup/skrieger/tissue_generator/CCF_registration/ccf_aligned_Trem2_5xFAD/cleaned_versions
+expression_metadata_dir: /work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata
+meta_info: /work/magroup/skrieger/tissue_generator/MERFISH_aging/4hierarchy_metainfo_mouse_geneunion2_DAG.pt
+
+# --- Job settings ---
+run_mode: train
+data_mode: rq1
+device: cuda
+skip_combined_fit: true
+
+# --- Model checkpoints ---
+expression_model_checkpoint: /compute/oven-0-13/skrieger/TG-base-noreweight2/epoch36_model.pt
+expression_output_dir: /compute/oven-0-13/skrieger/TG-base-noreweight-test
+expression_from_finetuned: true
+expression_rebalance_only: true
+
+# --- scRNA-seq reference ---
+expression_adata2: /work/magroup/skrieger/tissue_generator/MERFISH_aging/sc_ref_xyz_mousegenes_raw.h5ad
+
+# --- Training hyperparameters ---
+expression_batch_size: 128
+expression_max_len: 500
+expression_no_shuffle: true
+expression_epochs: 1000
+expression_lr: 0.001
+expression_lambda_val: 0.1
+expression_new_expression_size: 100
+expression_save_frequency: 1
+expression_xyz_noise: true
+expression_epoch_samples: 1000000
+expression_log_per_steps: 10

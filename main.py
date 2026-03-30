@@ -4,13 +4,14 @@ from datetime import datetime
 import zipfile
 
 import gdown
+import yaml
 
 from models.combined_model import CombinedModel
 from data_loader import SliceDataLoader
 from models.biological_model import KDEModelForGuidance
 import torch
 import numpy as np
-from inference import Inferernce
+from inference import Inference
 from evaluator import Evaluator
 import copy, os, pandas as pd
 import pickle as pkl
@@ -50,6 +51,12 @@ class TrainConfig:
 # ----------------- argparse -----------------
 def get_args():
     parser = argparse.ArgumentParser(description="Run inference with config options.")
+
+    # config file (loaded first so its values become defaults; explicit CLI flags override them)
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Path to a YAML config file. Values here become defaults; CLI flags take precedence.",
+    )
 
     # data / model paths
     parser.add_argument(
@@ -159,7 +166,7 @@ def get_args():
     parser.add_argument(
         "--out_csv",
         type=str,
-        default="results/debugging_cluster_model2.csv",
+        default="results/output.csv",
         help="Output CSV file path",
     )
     parser.add_argument(
@@ -173,7 +180,25 @@ def get_args():
         "--data_dir",
         type=str,
         default="data",
-        help="Directory containing the data",
+        help="Directory containing the rq1 data (quantized slices)",
+    )
+    parser.add_argument(
+        "--zhuang_data_dir",
+        type=str,
+        default=None,
+        help="Base directory for Zhuang MERFISH data; must contain Zhuang-ABCA-2 and Zhuang-ABCA-3 subdirs (required for rq2, rq3, rq4 modes)",
+    )
+    parser.add_argument(
+        "--diseased_data_dir",
+        type=str,
+        default=None,
+        help="Directory containing diseased (5xFAD Trem2) slices (required for rq5 mode)",
+    )
+    parser.add_argument(
+        "--rq3_v2_rq1_test_indices",
+        type=str,
+        default=None,
+        help="Comma-separated Zhuang-ABCA-2 test slice indices for rq3_v2_rq1 mode (default: '1,10,20,30,40')",
     )
 
     parser.add_argument(
@@ -240,8 +265,8 @@ def get_args():
     )
     parser.add_argument(
         "--expression_metadata_dir", type=str,
-        default="/work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata/",
-        help="Directory containing metadata files used by the expression model",
+        default="model_checkpoints/metadata",
+        help="Directory containing metadata files used by the expression model (edges_x/y/z.pkl, hierarchy.pkl, meta_info .pt)",
     )
     parser.add_argument(
         "--expression_from_finetuned", action="store_true",
@@ -257,6 +282,16 @@ def get_args():
         help="Ignore CSV weights; use uniform per-cell weights then rebalance mass across st/scrna groups",
     )
 
+    # Two-pass: extract --config first, load YAML, set as new defaults, then re-parse
+    # so that explicit CLI flags still take precedence over the config file.
+    pre_args, _ = parser.parse_known_args()
+    if pre_args.config is not None:
+        with open(pre_args.config) as f:
+            file_cfg = yaml.safe_load(f) or {}
+        # Skip null values so they don't clobber argparse defaults
+        file_cfg = {k: v for k, v in file_cfg.items() if v is not None}
+        parser.set_defaults(**file_cfg)
+
     return parser.parse_args()
 
 
@@ -269,8 +304,10 @@ def write_row(row, path):
 def already_done(cfg, path):
     if not os.path.isfile(path):
         return False
-    df = pd.read_csv(path, usecols=cfg.keys())
-    return any((df == pd.Series(cfg)).all(axis=1))
+    existing_cols = pd.read_csv(path, nrows=0).columns.tolist()
+    check_cols = [k for k in cfg.keys() if k in existing_cols]
+    df = pd.read_csv(path, usecols=check_cols)
+    return any((df == pd.Series({k: cfg[k] for k in check_cols})).all(axis=1))
 
 
 # ----------------- main -----------------
@@ -294,9 +331,12 @@ def main():
         with zipfile.ZipFile("model_checkpoints.zip", 'r') as zip_ref:
             zip_ref.extractall(".")
 
-
+    print(cfg)
     slice_data_loader = SliceDataLoader(
-        mode=args.data_mode, label=args.data_label, cfg=copy.deepcopy(cfg)
+        mode=args.data_mode,
+        label=args.data_label,
+        cfg=copy.deepcopy(cfg),
+        metadata_dir=args.expression_metadata_dir,
     )
 
     cfg["full_gene_panel"] = True
@@ -343,6 +383,7 @@ def main():
             data_mode=args.data_mode,
             data_label=args.data_label,
             data_dir=args.data_dir,
+            zhuang_data_dir=args.zhuang_data_dir,
             adata2=args.expression_adata2,
             metadata_dir=args.expression_metadata_dir,
             # training hyperparams
@@ -427,7 +468,7 @@ def main():
             print("skip", cfg)
             return
 
-        inf = Inferernce(
+        inf = Inference(
             combined_model, 
             kdemodel,
             slice_data_loader,
@@ -436,7 +477,7 @@ def main():
 
         pred = inf.run_inference(slice_data_loader.test_slices)
         print("Sending pred to evaluator...", pred)
-        res = Evaluator(cfg).evaluate(
+        res = Evaluator(cfg, metadata_dir=args.expression_metadata_dir).evaluate(
             pred, slice_data_loader.test_slices[0], sample=args.metric_sampling
         )
         res = {k: float(v) for k, v in res.items()}

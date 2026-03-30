@@ -1,0 +1,33 @@
+# Expression model finetuning (rq4)
+# ===================================
+# Usage: torchrun --nproc_per_node=2 --master_port $port main.py --config configs/finetune_rq4.yaml
+
+# --- Paths ---
+# data_dir points to the local data/ folder for CCF CSV files used by rq4
+data_dir: /work/magroup/skrieger/tissue_generator/spencer_mimyr/data
+zhuang_data_dir: /work/magroup/skrieger/MERFISH_BICCN/processed_data
+diseased_data_dir: /work/magroup/skrieger/tissue_generator/CCF_registration/ccf_aligned_Trem2_5xFAD/cleaned_versions
+expression_metadata_dir: /work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata
+meta_info: /work/magroup/skrieger/tissue_generator/MERFISH_aging/4hierarchy_metainfo_mouse_geneunion2_DAG.pt
+
+# --- Job settings ---
+run_mode: train
+data_mode: rq4
+device: cuda
+skip_combined_fit: true
+
+# --- Model checkpoints ---
+expression_model_checkpoint: /compute/oven-0-13/skrieger/TG-base-noreweight2/epoch100_model.pt
+expression_output_dir: /compute/oven-0-13/skrieger/Zhuang-3-new2
+expression_from_finetuned: true
+
+# --- Training hyperparameters ---
+expression_batch_size: 128
+expression_max_len: 500
+expression_no_shuffle: true
+expression_epochs: 1000
+expression_lr: 0.0005
+expression_lambda_val: 0.1
+expression_new_expression_size: 100
+expression_save_frequency: 2
+expression_xyz_noise: true

@@ -20,7 +20,7 @@ from models.generative_transformer.Mimyr import (
 )
 
 
-class Inferernce:
+class Inference:
     def __init__(self, combined_model, location_model, slice_data_loader, config):
         self.slice_data_loader = slice_data_loader
         self.token_mapping_model = slice_data_loader.gene_exp_model

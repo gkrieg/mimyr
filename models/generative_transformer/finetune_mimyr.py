@@ -388,6 +388,12 @@ def get_parser():
         help="Root directory containing the .h5ad data files",
     )
     parser.add_argument(
+        "--zhuang-data-dir",
+        type=str,
+        default=None,
+        help="Base directory for Zhuang MERFISH data; must contain Zhuang-ABCA-2 and Zhuang-ABCA-3 subdirs (required for rq2, rq3, rq4 modes)",
+    )
+    parser.add_argument(
         "--data-label",
         type=str,
         default="cluster",
@@ -478,8 +484,8 @@ def get_parser():
     parser.add_argument(
         "--metadata-dir",
         type=str,
-        default="/work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata/",
-        help="Directory containing metadata files (edges, meta_info) for harmonization",
+        default="model_checkpoints/metadata",
+        help="Directory containing metadata files (edges_x/y/z.pkl, meta_info .pt) for harmonization",
     )
     parser.add_argument(
         "--disable-sampling-probs",
@@ -621,6 +627,7 @@ def train(args):
     cfg = {
         "data_dir": args.data_dir,
         "meta_info": os.path.basename(args.meta_info),
+        "zhuang_data_dir": getattr(args, "zhuang_data_dir", None),
     }
     slice_loader = SliceDataLoader(
         mode=args.data_mode,
@@ -846,6 +853,8 @@ def train(args):
         print(
             f"Epoch {epoch} — train total {avg_loss:.4f}, cls {avg_cls:.4f}, exp_bin {avg_exp_bin:.4f}, exp_real {avg_exp_real:.4f}"
         )
+        # Accumulate epoch-level metrics; val metrics will be merged before the single log call
+        epoch_log = {}
         if rank == 0:
             mean_train_pearson_epoch = (
                 float(np.mean(all_train_pearson_rs))
@@ -859,7 +868,7 @@ def train(args):
             mean_train_rec_epoch = (
                 float(np.mean(all_train_rec)) if all_train_rec else 0.0
             )
-            wandb.log(
+            epoch_log.update(
                 {
                     "train/epoch_loss": avg_loss,
                     "train/epoch_loss_cls": avg_cls,
@@ -935,7 +944,7 @@ def train(args):
                 f"Validation mean F1: {mean_val_f1:.4f} (P={mean_val_prc:.4f}, R={mean_val_rec:.4f})"
             )
             if rank == 0:
-                wandb.log(
+                epoch_log.update(
                     {
                         "valid/epoch_loss": avg_v_loss,
                         "valid/epoch_loss_cls": avg_v_cls,
@@ -945,9 +954,12 @@ def train(args):
                         "valid/f1": mean_val_f1,
                         "valid/precision": mean_val_prc,
                         "valid/recall": mean_val_rec,
-                        "epoch": epoch,
                     }
                 )
+
+        # Log all epoch-level metrics (train + val) in one call so they share the same W&B step
+        if rank == 0:
+            wandb.log(epoch_log)
 
         # Save epoch checkpoint
         if epoch % args.save_frequency == 0 and rank == 0:

@@ -56,25 +56,25 @@ class SliceDataLoader:
         mode="intra",
         label="subclass",
         cfg=None,
-        metadata_dir="/work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata/",
+        metadata_dir="model_checkpoints/metadata",
     ):
         """
         Args:
-            mode (str): 'intra' or 'transfer'
-            transfer_from (list, optional): List of slice names for training (only for transfer mode)
-            transfer_to (list, optional): List of slice names for val/test (only for transfer mode)
+            mode (str): data mode — one of rq1, rq2, rq2_v2, rq3, rq3_v2, rq3_v2_rq1, rq4, rq5
+            label (str): obs column to use as the cell-type label
+            cfg (dict): full config dict (from argparse); must include data_dir and,
+                for Zhuang-based modes, zhuang_data_dir; for rq5, diseased_data_dir
+            metadata_dir (str): directory containing edges_x/y/z.pkl, hierarchy.pkl,
+                and the meta_info .pt file
         """
         self.mode = mode
-
         self.label = label
-
-        self.input_dirs = {
-            "type1": "/work/magroup/skrieger/tissue_generator/quantized_slices/subclass_z1_d338_0_rotated",
-        }
-
         self.ccf_csv = "data/ccf_coordinates.csv"
-
-        self.metadata_dir = metadata_dir
+        # Normalize so downstream f-string path joins always work
+        self.metadata_dir = metadata_dir.rstrip(os.sep) + os.sep
+        # rq1 test/val indices — used in rq3_v2_rq1 to exclude from training
+        self._rq1_test_indices = [8, 16, 29, 34, 43]
+        self._rq1_val_indices = [6, 28, 44]
 
         self.train_slices = None
         self.val_slices = None
@@ -83,7 +83,7 @@ class SliceDataLoader:
         self.density_model = None
         self.cfg = cfg
 
-    def load_intra_slices(self, fast=False, fast_select=None):
+    def load_intra_slices(self, fast=False, fast_select=None, select_indices=None):
         # Load only slices1
         input_dir = self.cfg["data_dir"] + "/subclass_z1_d338_0_rotated"
         sorted_slices1 = [
@@ -153,6 +153,13 @@ class SliceDataLoader:
                 for i, fname in enumerate(sorted_slices1)
                 if i in [fast_select - 1, fast_select, fast_select + 1]
             ]
+        elif select_indices is not None:
+            idx_set = set(select_indices)
+            slices1 = [
+                sc.read_h5ad(os.path.join(input_dir, fname))
+                for i, fname in enumerate(sorted_slices1)
+                if i in idx_set
+            ]
         else:
             slices1 = [
                 sc.read_h5ad(os.path.join(input_dir, fname)) for fname in sorted_slices1
@@ -162,10 +169,14 @@ class SliceDataLoader:
     def load_zhuangn_slices(self, n=2, fast_select=None, remove_edges=True):
         print("Fast selecting", fast_select)
 
-        # Load slices2
-        input_dir = (
-            f"/work/magroup/skrieger/MERFISH_BICCN/processed_data/Zhuang-ABCA-{n}"
-        )
+        zhuang_base = self.cfg.get("zhuang_data_dir")
+        if not zhuang_base:
+            print(self.cfg)
+            raise ValueError(
+                f"data mode '{self.mode}' requires --zhuang_data_dir (or zhuang_data_dir in config.yaml) "
+                f"to be set to the directory containing Zhuang-ABCA-* subdirectories."
+            )
+        input_dir = os.path.join(zhuang_base, f"Zhuang-ABCA-{n}")
         if remove_edges:
             sorted_slices2 = sorted(
                 [f for f in os.listdir(input_dir) if f.endswith(".h5ad")]
@@ -206,8 +217,12 @@ class SliceDataLoader:
         return slices2
 
     def load_diseased_slices(self):
-        # Load only slices1
-        input_dir = "/work/magroup/skrieger/tissue_generator/CCF_registration/ccf_aligned_Trem2_5xFAD/cleaned_versions/"
+        input_dir = self.cfg.get("diseased_data_dir")
+        if not input_dir:
+            raise ValueError(
+                "data mode 'rq5' requires --diseased_data_dir (or diseased_data_dir in config.yaml) "
+                "to be set to the directory containing the 5xFAD Trem2 .h5ad files."
+            )
         sorted_slices1 = [
             "Trem2_5xFAD1_cleaned.h5ad",
             "Trem2_5xFAD2_cleaned.h5ad",
@@ -592,6 +607,58 @@ class SliceDataLoader:
 
             ref_indices = [5, 5, 5, 15, 15, 25, 25, 35, 35, 44]
             reference_slices = [slices_tokenized[i] for i in ref_indices]
+
+            train_slices, val_slices, test_slices, reference_slices = (
+                self._harmonize_slice_lists(
+                    train_slices, val_slices, test_slices, reference_slices
+                )
+            )
+            self._set_slice_attributes(
+                train_slices, val_slices, test_slices, reference_slices
+            )
+
+        elif self.mode == "rq3_v2_rq1":
+            # Test/val from Zhuang-ABCA-2 (same split as rq3_v2).
+            # Training uses only the rq1 slices closest to each rq3_v2 test index.
+            # No reference slices are set since this mode is for training only.
+
+            # Configurable test indices (Zhuang-ABCA-2); default matches rq3_v2
+            raw = self.cfg.get("rq3_v2_rq1_test_indices")
+            if raw is not None:
+                if isinstance(raw, str):
+                    test_indices = [int(x.strip()) for x in raw.split(",")]
+                else:
+                    test_indices = list(raw)
+            else:
+                test_indices = [1, 10, 20, 30, 40]
+
+            # Determine which rq1 indices to load before reading any files
+            rq1_excluded = set(self._rq1_test_indices + self._rq1_val_indices)
+            n_rq1_slices = 54  # total slices in sorted_slices1
+            rq1_train_eligible = [
+                i for i in range(n_rq1_slices) if i not in rq1_excluded
+            ]
+            train_indices_rq1 = []
+            for ti in test_indices:
+                nearest = min(rq1_train_eligible, key=lambda i: abs(i - ti))
+                if nearest not in train_indices_rq1:
+                    train_indices_rq1.append(nearest)
+            train_indices_rq1.sort()
+            print(f"rq3_v2_rq1: loading rq1 indices {train_indices_rq1} "
+                  f"(closest to rq3_v2 test indices {test_indices})")
+
+            slices = self.load_zhuangn_slices(n=2)
+            slices_tokenized = self._align_and_tokenize_slices(slices)
+
+            rq1_slices_raw = self.load_intra_slices(select_indices=train_indices_rq1)
+            rq1_slices_tokenized = self._align_and_tokenize_slices(rq1_slices_raw)
+
+            val_indices = [44]
+            test_slices = [slices_tokenized[i] for i in test_indices]
+            val_slices = [slices_tokenized[i] for i in val_indices]
+            # rq1 slices are loaded in index order; map back positionally
+            train_slices = rq1_slices_tokenized
+            reference_slices = []
 
             train_slices, val_slices, test_slices, reference_slices = (
                 self._harmonize_slice_lists(

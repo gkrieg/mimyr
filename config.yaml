@@ -1,0 +1,52 @@
+# MIMYR Configuration
+# ====================
+# Values here act as defaults; any explicit CLI flag overrides them.
+#
+# Usage:
+#   python main.py --config config.yaml [additional CLI flags]
+#   torchrun --nproc_per_node=3 main.py --config config.yaml --run_mode train ...
+#
+# Only set the keys relevant to your run. Unset keys (or keys set to null/~)
+# fall back to the argparse defaults.
+
+# ---------------------------------------------------------------------------
+# Data paths
+# ---------------------------------------------------------------------------
+
+# Root directory for rq1 data (the quantized_slices tree).
+data_dir: /work/magroup/skrieger/tissue_generator/quantized_slices
+
+# Base directory for Zhuang MERFISH data. Must contain subdirectories named
+# Zhuang-ABCA-2, Zhuang-ABCA-3, etc. Required for modes: rq2, rq2_v2, rq3, rq3_v2, rq4.
+zhuang_data_dir: /work/magroup/skrieger/MERFISH_BICCN/processed_data
+
+# Directory containing the diseased (5xFAD Trem2) .h5ad files. Required for rq5.
+diseased_data_dir: /work/magroup/skrieger/tissue_generator/CCF_registration/ccf_aligned_Trem2_5xFAD/cleaned_versions
+
+# ---------------------------------------------------------------------------
+# Metadata
+# ---------------------------------------------------------------------------
+
+# Directory containing the expression model metadata files:
+#   edges_x.pkl, edges_y.pkl, edges_z.pkl  — coordinate bin edges
+#   hierarchy.pkl                           — cell-type hierarchy
+#   <meta_info>.pt                          — token/gene set (pointed to by --meta_info)
+expression_metadata_dir: /work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata
+
+# Full path to the meta_info .pt file (token/gene set used by the expression model).
+meta_info: /work/magroup/skrieger/tissue_generator/MERFISH_aging/4hierarchy_metainfo_mouse_geneunion2_DAG.pt
+
+# ---------------------------------------------------------------------------
+# Model checkpoints
+# ---------------------------------------------------------------------------
+
+location_model_checkpoint: model_checkpoints/smoothtune_conditional_ddpm_2d_checkpoint_400.pt
+cluster_model_checkpoint: model_checkpoints/best_model_rq1.pt
+expression_model_checkpoint: model_checkpoints/TG-base4_epoch4_model.pt
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+out_csv: results/output.csv
+artifact_dir: artifacts
