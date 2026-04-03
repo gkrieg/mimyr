@@ -361,9 +361,7 @@ class Inference:
 
         elif exp_type == "model":
 
-            meta_info_path = (
-                f'{self.slice_data_loader.metadata_dir}{self.config["meta_info"]}'
-            )
+            meta_info_path = os.path.join(self.slice_data_loader.metadata_dir, self.config["meta_info"])
             meta_info = torch.load(meta_info_path)
 
             # 1) preserve obs but add necessary technology metadata, etc.

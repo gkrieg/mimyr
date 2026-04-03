@@ -1,3 +1,4 @@
+import os
 import torch
 
 from metrics import (
@@ -13,10 +14,12 @@ class Evaluator:
     def __init__(
         self,
         config,
-        metadata_dir="/work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata/",
+        metadata_dir="model_checkpoints/metadata",
     ):
         self.config = config
-        self.gene_set = torch.load(f"{metadata_dir}{config['meta_info']}")["gene_set"]
+        self.gene_set = torch.load(
+            os.path.join(metadata_dir, config["meta_info"])
+        )["gene_set"]
 
     def evaluate(self, predicted_adata, target_adata, sample=100):
         results = {}
@@ -86,6 +89,22 @@ class Evaluator:
 
             for r in [0.03, 0.04, 0.05, 0.09, 0.12, 0.15]:
                 sc = soft_correlation(
+                    target_adata,
+                    target_adata.obsm["aligned_spatial"],
+                    predicted_adata,
+                    predicted_adata.obsm["spatial"],
+                    radius=r,
+                    sample=sample,
+                    corr_type="spearman",
+                    gene_set=self.gene_set,
+                )
+                print("soft spearman correlation radius @", r, ":", sc)
+                results[f"soft_spearman_correlation_radius@{r}"] = sc
+
+        if "soft_correlation_top_100" in self.config["metrics"]:
+
+            for r in [0.03, 0.04, 0.05, 0.09, 0.12, 0.15]:
+                sc = soft_correlation_top_100(
                     target_adata,
                     target_adata.obsm["aligned_spatial"],
                     predicted_adata,

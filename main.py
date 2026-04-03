@@ -281,6 +281,10 @@ def get_args():
         "--expression_rebalance_only", action="store_true",
         help="Ignore CSV weights; use uniform per-cell weights then rebalance mass across st/scrna groups",
     )
+    parser.add_argument(
+        "--expression_eval_test", action="store_true",
+        help="Also evaluate on the test split each epoch alongside validation",
+    )
 
     # Two-pass: extract --config first, load YAML, set as new defaults, then re-parse
     # so that explicit CLI flags still take precedence over the config file.
@@ -415,6 +419,7 @@ def main():
             kv_cache=False,
             val_split=0.0,  # data is pre-split by SliceDataLoader; this is informational only
             rebalance_only=args.expression_rebalance_only,
+            eval_test=args.expression_eval_test,
         )
         _train_expression_model(expr_args)
         exit(0)

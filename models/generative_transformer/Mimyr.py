@@ -89,8 +89,10 @@ class Mimyr:
 
         # 3) compute bins *only* on the positive values
         if len(nonzero_vals) > 0:
-            # digitize positives into 1…N
+            # digitize positives into 1…N; clamp to [1, n_express_level-1] so
+            # values above the training-data max don't exceed the embedding size
             pos_bins = np.digitize(nonzero_vals, self.bin_edges, right=True)
+            pos_bins = np.clip(pos_bins, 1, self.n_express_level - 1)
         else:
             pos_bins = np.array([], dtype=int)
 

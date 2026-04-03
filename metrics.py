@@ -467,6 +467,46 @@ def soft_correlation(
     return correlation
 
 
+def soft_correlation_top_100(
+    gt_adata,
+    gt_positions,
+    pred_adata,
+    pred_positions,
+    radius=None,
+    k=0,
+    sample=None,
+    return_list=False,
+    corr_type="pearson",
+):
+    """
+    Wrapper around soft_correlation that restricts to the top 100 genes
+    by total expression in the ground truth (gt_adata).
+    """
+    import scipy.sparse as sp
+
+    X = gt_adata.X
+    if sp.issparse(X):
+        gene_totals = np.asarray(X.sum(axis=0)).ravel()
+    else:
+        gene_totals = np.asarray(X).sum(axis=0).ravel()
+
+    top_100_idx = np.argsort(gene_totals)[-100:]
+    top_100_genes = gt_adata.var_names[top_100_idx]
+
+    return soft_correlation(
+        gt_adata,
+        gt_positions,
+        pred_adata,
+        pred_positions,
+        radius=radius,
+        k=k,
+        sample=sample,
+        return_list=return_list,
+        corr_type=corr_type,
+        gene_set=top_100_genes,
+    )
+
+
 def soft_f1(
     gt_adata,
     gt_positions,

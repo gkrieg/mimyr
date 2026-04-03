@@ -164,6 +164,8 @@ class SliceDataLoader:
             slices1 = [
                 sc.read_h5ad(os.path.join(input_dir, fname)) for fname in sorted_slices1
             ]
+        for s in slices1:
+            s.obs["technology"] = "M550"
         return slices1
 
     def load_zhuangn_slices(self, n=2, fast_select=None, remove_edges=True):
@@ -211,9 +213,12 @@ class SliceDataLoader:
             slice.obs["x_ccf"] = df_filtered["x"]
             slice.obs["y_ccf"] = df_filtered["y"]
             slice.obs["z_ccf"] = df_filtered["z"]
+            slice.obs["technology"] = "M1100"
             valid_mask = ~slice.obs[["x_ccf", "y_ccf", "z_ccf"]].isna().any(axis=1)
             slices2[i] = slice[valid_mask].copy()
 
+        slices2 = [s for s in slices2 if s.n_obs > 0]
+        print(f'Length of slices2 is {len(slices2)}')
         return slices2
 
     def load_diseased_slices(self):
@@ -311,7 +316,7 @@ class SliceDataLoader:
         rank=0,
     ):
         """
-        Concatenate train/val slices into self.adata_train / self.adata_val.
+        Concatenate train/val/test slices into self.adata_train / self.adata_val / self.adata_test.
         If adata2_path is provided, load and merge it into the training set.
         """
         adata_train = (
@@ -328,6 +333,16 @@ class SliceDataLoader:
         )
         adata_val.obs_names_make_unique()
 
+        if self.test_slices:
+            adata_test = (
+                sc.concat(self.test_slices, join="outer")
+                if len(self.test_slices) > 1
+                else self.test_slices[0].copy()
+            )
+            adata_test.obs_names_make_unique()
+        else:
+            adata_test = None
+
         if adata2_path is not None:
             if output_dir is not None:
                 train_path = os.path.join(output_dir, "train.h5ad")
@@ -335,6 +350,7 @@ class SliceDataLoader:
                     print(f"Found existing {train_path}, loading instead of rebuilding...")
                     self.adata_train = sc.read_h5ad(train_path)
                     self.adata_val = adata_val
+                    self.adata_test = adata_test
                     return
 
             rng = np.random.default_rng(seed=seed)
@@ -404,7 +420,8 @@ class SliceDataLoader:
 
         self.adata_train = adata_train
         self.adata_val = adata_val
-        # Free per-slice objects now that they are concatenated into adata_train/adata_val
+        self.adata_test = adata_test
+        # Free per-slice objects now that they are concatenated
         self.train_slices = None
         self.val_slices = None
 
@@ -617,6 +634,38 @@ class SliceDataLoader:
                 train_slices, val_slices, test_slices, reference_slices
             )
 
+        elif self.mode in ("rq3_v2_d4", "rq3_v2_d3", "rq3_v2_d2", "rq3_v2_d1"):
+            d = int(self.mode[-1])
+            slices = self.load_zhuangn_slices(n=2)
+            slices_tokenized = self._align_and_tokenize_slices(slices)
+
+            test_indices = [1, 10, 20, 30, 40]
+            val_indices = [44]
+
+            test_slices = [slices_tokenized[i] for i in test_indices]
+            val_slices = [slices_tokenized[i] for i in val_indices]
+
+            train_indices = [10 - d, 20 - d, 30 - d, 40 - d]
+            train_slices = [slices_tokenized[i] for i in train_indices]
+
+            ref_indices = (
+                [train_indices[0]] * 3
+                + [train_indices[1]] * 2
+                + [train_indices[2]] * 2
+                + [train_indices[3]] * 2
+                + [44]
+            )
+            reference_slices = [slices_tokenized[i] for i in ref_indices]
+
+            train_slices, val_slices, test_slices, reference_slices = (
+                self._harmonize_slice_lists(
+                    train_slices, val_slices, test_slices, reference_slices
+                )
+            )
+            self._set_slice_attributes(
+                train_slices, val_slices, test_slices, reference_slices
+            )
+
         elif self.mode == "rq3_v2_rq1":
             # Test/val from Zhuang-ABCA-2 (same split as rq3_v2).
             # Training uses only the rq1 slices closest to each rq3_v2 test index.
@@ -659,6 +708,36 @@ class SliceDataLoader:
             # rq1 slices are loaded in index order; map back positionally
             train_slices = rq1_slices_tokenized
             reference_slices = []
+
+            train_slices, val_slices, test_slices, reference_slices = (
+                self._harmonize_slice_lists(
+                    train_slices, val_slices, test_slices, reference_slices
+                )
+            )
+            self._set_slice_attributes(
+                train_slices, val_slices, test_slices, reference_slices
+            )
+
+        elif self.mode == "rq4_rq3":
+            slices = self.load_zhuangn_slices(n=3, remove_edges=False)
+            slices_tokenized = self._align_and_tokenize_slices(slices)
+
+            test_indices = [2, 5, 11, 14, 18]
+            val_indices = [7]
+
+            test_slices = [slices_tokenized[i] for i in test_indices]
+            val_slices = [slices_tokenized[i] for i in val_indices]
+
+            train_indices = [0, 3, 12, 17]
+            train_slices = [slices_tokenized[i] for i in train_indices]
+
+            ref_indices = [0, 3, 3, 7, 7, 12, 12, 17, 17, 17]
+            reference_slices = [slices_tokenized[i] for i in ref_indices]
+
+            slices_rq3 = self.load_zhuangn_slices(n=2)
+            slices_tokenized_rq3 = self._align_and_tokenize_slices(slices_rq3)
+
+            train_slices.extend(slices_tokenized_rq3)
 
             train_slices, val_slices, test_slices, reference_slices = (
                 self._harmonize_slice_lists(

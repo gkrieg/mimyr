@@ -522,6 +522,11 @@ def get_parser():
         default=None,
         help="bin_edges file for gene expression binning",
     )
+    parser.add_argument(
+        "--eval-test",
+        action="store_true",
+        help="Also evaluate on the test split each epoch alongside validation",
+    )
 
     return parser
 
@@ -647,6 +652,7 @@ def train(args):
 
     adata_train = slice_loader.adata_train
     adata_val = slice_loader.adata_val
+    adata_test = slice_loader.adata_test if args.eval_test else None
 
     args.use_sampling_probs = not args.disable_sampling_probs
     if args.rebalance_only:
@@ -711,6 +717,23 @@ def train(args):
         )
     else:
         val_loader = None
+
+    if adata_test is not None:
+        test_loader, _ = get_generation_dataloader(
+            adata=adata_test,
+            meta_info=meta_info,
+            batch_size=args.batch_size,
+            max_len=args.max_len,
+            shuffle=False,
+            num_workers=args.num_workers,
+            n_express_level=model.config.expression_level,
+            include_0s=False,
+            use_sampling_probs=False,
+            sampling_col=args.sampling_col,
+            bin_edges=bin_edges,
+        )
+    else:
+        test_loader = None
     print("loaded anndata")
 
     # 5) Optimizer
@@ -957,7 +980,82 @@ def train(args):
                     }
                 )
 
-        # Log all epoch-level metrics (train + val) in one call so they share the same W&B step
+        if test_loader is not None:
+            torch.cuda.empty_cache()
+            model.eval()
+            t_loss, t_cls, t_exp_bin, t_exp_real, t_count = 0.0, 0.0, 0.0, 0.0, 0
+            all_test_pearson_rs = []
+            all_test_f1, all_test_prec, all_test_rec = [], [], []
+            with torch.no_grad():
+                for batch in tqdm(test_loader, desc=f"Epoch {epoch} [test]"):
+                    input_ids = batch["input_ids"].to(device)
+                    attention_mask = batch["attention_mask"].to(device)
+                    labels = batch.get("labels")
+                    x_expr = batch["input_vals"].to(device)
+                    expr_target = batch["target_vals"].to(device)
+
+                    if labels is not None:
+                        labels = labels.to(device)
+
+                    logits_labels, _, logits_exp_real, l, lc, leb, ler = model(
+                        idx=input_ids,
+                        x_expr=x_expr,
+                        targets=labels,
+                        y_expr=expr_target,
+                        lambda_val=args.lambda_val,
+                        return_hidden=False,
+                    )
+                    t_loss += l.item()
+                    t_cls += lc.item()
+                    t_exp_bin += leb.item()
+                    t_exp_real += ler.item()
+                    t_count += 1
+                    pearson_rs, f1s, precs, recs = evaluate_expression_metrics(
+                        adata=adata_test,
+                        batch=batch,
+                        logits_labels=logits_labels.cpu(),
+                        logits_exp_real=logits_exp_real.cpu(),
+                        tokenizer=tokenizer,
+                        tokens_and_vals_to_expression_row_fn=tokens_and_vals_to_expression_row,
+                        var_names=adata_test.var_names.tolist(),
+                        labels=labels,
+                        mask_token_id=-100,
+                    )
+                    all_test_pearson_rs.extend(pearson_rs)
+                    all_test_f1.extend(f1s)
+                    all_test_prec.extend(precs)
+                    all_test_rec.extend(recs)
+
+            avg_t_loss = t_loss / t_count
+            avg_t_cls = t_cls / t_count
+            avg_t_exp_bin = t_exp_bin / t_count
+            avg_t_exp_real = t_exp_real / t_count
+            print(
+                f"Epoch {epoch} — test total {avg_t_loss:.4f}, cls {avg_t_cls:.4f}, exp {avg_t_exp_bin:.4f}"
+            )
+            mean_test_pearson_r = np.mean(all_test_pearson_rs)
+            print(f"Test mean Pearson r: {mean_test_pearson_r:.4f}")
+            mean_test_f1 = float(np.mean(all_test_f1)) if all_test_f1 else 0.0
+            mean_test_prc = float(np.mean(all_test_prec)) if all_test_prec else 0.0
+            mean_test_rec = float(np.mean(all_test_rec)) if all_test_rec else 0.0
+            print(
+                f"Test mean F1: {mean_test_f1:.4f} (P={mean_test_prc:.4f}, R={mean_test_rec:.4f})"
+            )
+            if rank == 0:
+                epoch_log.update(
+                    {
+                        "test/epoch_loss": avg_t_loss,
+                        "test/epoch_loss_cls": avg_t_cls,
+                        "test/epoch_loss_exp_bin": avg_t_exp_bin,
+                        "test/epoch_loss_exp_real": avg_t_exp_real,
+                        "test/pearson_r": mean_test_pearson_r,
+                        "test/f1": mean_test_f1,
+                        "test/precision": mean_test_prc,
+                        "test/recall": mean_test_rec,
+                    }
+                )
+
+        # Log all epoch-level metrics (train + val + test) in one call so they share the same W&B step
         if rank == 0:
             wandb.log(epoch_log)
 

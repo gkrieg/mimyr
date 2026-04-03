@@ -31,10 +31,10 @@ diseased_data_dir: /work/magroup/skrieger/tissue_generator/CCF_registration/ccf_
 #   edges_x.pkl, edges_y.pkl, edges_z.pkl  — coordinate bin edges
 #   hierarchy.pkl                           — cell-type hierarchy
 #   <meta_info>.pt                          — token/gene set (pointed to by --meta_info)
-expression_metadata_dir: /work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata
+expression_metadata_dir: /work/magroup/skrieger/tissue_generator/spencer_mimyr/models/generative_transformer/metadata
 
 # Full path to the meta_info .pt file (token/gene set used by the expression model).
-meta_info: /work/magroup/skrieger/tissue_generator/MERFISH_aging/4hierarchy_metainfo_mouse_geneunion2_DAG.pt
+meta_info: /work/magroup/skrieger/tissue_generator/spencer_mimyr/models/generative_transformer/metadata/4hierarchy_metainfo_mouse_geneunion2_DAG.pt
 
 # ---------------------------------------------------------------------------
 # Model checkpoints
