@@ -527,6 +527,12 @@ def get_parser():
         action="store_true",
         help="Also evaluate on the test split each epoch alongside validation",
     )
+    parser.add_argument(
+        "--dropout",
+        type=float,
+        default=None,
+        help="Override the dropout value from the checkpoint model_args (e.g. 0.0 to disable dropout)",
+    )
 
     return parser
 
@@ -596,6 +602,8 @@ def train(args):
         print(f"Overwriting config.vocab_size to {args.overwrite_vocab_size}")
     if args.new_expression_size is not None and args.from_finetuned:
         ckp["model_args"]["expression_level"] = args.new_expression_size
+    if args.dropout is not None:
+        ckp["model_args"]["dropout"] = args.dropout
     gptconf = MimyrConfig(**ckp["model_args"])
     print(gptconf)
     ModelClass = MimyrModel
@@ -957,7 +965,7 @@ def train(args):
             avg_v_exp_bin = v_exp_bin / count
             avg_v_exp_real = v_exp_real / count
             print(
-                f"Epoch {epoch} — valid total {avg_v_loss:.4f}, cls {avg_v_cls:.4f}, exp {avg_v_exp_bin:.4f}"
+                f"Epoch {epoch} — valid total {avg_v_loss:.4f}, cls {avg_v_cls:.4f}, exp_bin {avg_v_exp_bin:.4f}, exp_real {avg_v_exp_real:.4f}"
             )
             mean_pearson_r = np.mean(all_pearson_rs)
             print(f"Validation mean Pearson r: {mean_pearson_r:.4f}")
@@ -1032,7 +1040,7 @@ def train(args):
             avg_t_exp_bin = t_exp_bin / t_count
             avg_t_exp_real = t_exp_real / t_count
             print(
-                f"Epoch {epoch} — test total {avg_t_loss:.4f}, cls {avg_t_cls:.4f}, exp {avg_t_exp_bin:.4f}"
+                f"Epoch {epoch} — test total {avg_t_loss:.4f}, cls {avg_t_cls:.4f}, exp_bin {avg_t_exp_bin:.4f}, exp_real {avg_t_exp_real:.4f}"
             )
             mean_test_pearson_r = np.mean(all_test_pearson_rs)
             print(f"Test mean Pearson r: {mean_test_pearson_r:.4f}")

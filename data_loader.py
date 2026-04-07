@@ -730,6 +730,63 @@ class SliceDataLoader:
                 train_slices, val_slices, test_slices, reference_slices
             )
 
+        elif self.mode == "rq3_v2_cheat":
+            slices = self.load_zhuangn_slices(n=2)
+            slices_tokenized = self._align_and_tokenize_slices(slices)
+
+            test_indices = [1, 10, 20, 30, 40]
+            val_indices = [44]
+
+            test_slices = [slices_tokenized[i] for i in test_indices]
+            val_slices = [slices_tokenized[i] for i in val_indices]
+
+            train_indices = [1, 10, 20, 30, 40]
+            ref_indices = [5, 5, 5, 15, 15, 25, 25, 35, 35, 44]
+            reference_slices = [slices_tokenized[i] for i in ref_indices]
+
+            train_slices = [slices_tokenized[i] for i in train_indices]
+
+            if self.cfg.get("use_rq1_train"):
+                # Supplement Zhuang training slices with rq1 slices whose mean x_ccf
+                # most closely matches each test slice.
+                n_rq1_slices = 53
+                rq1_train_eligible = list(range(n_rq1_slices))
+                test_key = "_".join(str(i) for i in sorted(test_indices))
+                cache_path = os.path.join(
+                    self.metadata_dir, f"train_indices_rq1_{test_key}.json"
+                )
+                if os.path.exists(cache_path):
+                    with open(cache_path) as f:
+                        train_indices_rq1 = json.load(f)
+                    print(
+                        f"rq3_v2+rq1: loaded rq1 train indices from cache "
+                        f"({cache_path}): {train_indices_rq1}"
+                    )
+                else:
+                    test_slices_for_matching = [slices_tokenized[i] for i in test_indices]
+                    train_indices_rq1 = self._compute_rq1_train_indices_by_z_ccf(
+                        test_slices_for_matching, rq1_train_eligible
+                    )
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    with open(cache_path, "w") as f:
+                        json.dump(train_indices_rq1, f)
+                    print(
+                        f"rq3_v2+rq1: computed rq1 train indices by x_ccf and saved to "
+                        f"{cache_path}: {train_indices_rq1}"
+                    )
+                rq1_slices_raw = self.load_intra_slices(select_indices=train_indices_rq1)
+                rq1_slices_tokenized = self._align_and_tokenize_slices(rq1_slices_raw)
+                train_slices.extend(rq1_slices_tokenized)
+
+            train_slices, val_slices, test_slices, reference_slices = (
+                self._harmonize_slice_lists(
+                    train_slices, val_slices, test_slices, reference_slices
+                )
+            )
+            self._set_slice_attributes(
+                train_slices, val_slices, test_slices, reference_slices
+            )
+
         elif self.mode in ("rq3_v2_d4", "rq3_v2_d3", "rq3_v2_d2", "rq3_v2_d1"):
             d = int(self.mode[-1])
             slices = self.load_zhuangn_slices(n=2)

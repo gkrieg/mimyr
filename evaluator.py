@@ -15,13 +15,18 @@ class Evaluator:
         self,
         config,
         metadata_dir="model_checkpoints/metadata",
+        gene_set_file=None,
     ):
         self.config = config
-        self.gene_set = torch.load(
-            os.path.join(metadata_dir, config["meta_info"])
-        )["gene_set"]
+        if gene_set_file is not None:
+            with open(gene_set_file) as f:
+                self.gene_set = [line.strip() for line in f if line.strip()]
+        else:
+            self.gene_set = torch.load(
+                os.path.join(metadata_dir, config["meta_info"])
+            )["gene_set"]
 
-    def evaluate(self, predicted_adata, target_adata, sample=100):
+    def evaluate(self, predicted_adata, target_adata, sample=100, filter_by_gt=False):
         results = {}
 
         ### Flatten the 3d to 2d
@@ -97,6 +102,7 @@ class Evaluator:
                     sample=sample,
                     corr_type="spearman",
                     gene_set=self.gene_set,
+                    filter_by_gt=filter_by_gt,
                 )
                 print("soft spearman correlation radius @", r, ":", sc)
                 results[f"soft_spearman_correlation_radius@{r}"] = sc
@@ -128,6 +134,7 @@ class Evaluator:
                     radius=r,
                     sample=sample,
                     gene_set=self.gene_set,
+                    filter_by_gt=filter_by_gt,
                 )[0]
                 print("soft f1 radius @", r, ":", sp)
                 results[f"soft_f1_radius@{r}"] = sp

@@ -346,26 +346,39 @@ def _nnz_per_gene(X):
     return np.asarray((X > 0).sum(axis=0)).ravel()
 
 
-def intersect_and_filter_X(gt_adata, pred_adata, min_expr_cells=0, gene_set=None):
+def intersect_and_filter_X(gt_adata, pred_adata, min_expr_cells=0, gene_set=None, filter_by_gt=False):
     # 1) intersect genes (order is preserved by AnnData slicing)
     common_genes = gt_adata.var_names.intersection(pred_adata.var_names)
-    if gene_set is not None:
-        common_genes = common_genes.intersection(np.asarray(gene_set))
 
     if len(common_genes) == 0:
         raise ValueError("No overlapping genes between gt_adata and pred_adata.")
-    print(gt_adata.var_names)
+
+    # 2) if gene_set is provided, restrict to those genes within common_genes
+    if gene_set is not None:
+        kept_genes = common_genes.intersection(np.asarray(gene_set))
+        if len(kept_genes) == 0:
+            raise ValueError("No genes in gene_set overlap with common genes.")
+        gt_X_filtered = gt_adata[:, kept_genes].X
+        pred_X_filtered = pred_adata[:, kept_genes].X
+        if sp.issparse(gt_X_filtered):
+            gt_X_filtered = gt_X_filtered.todense()
+        if sp.issparse(pred_X_filtered):
+            pred_X_filtered = pred_X_filtered.todense()
+        return gt_X_filtered.tolist(), pred_X_filtered.tolist(), kept_genes
+
     gt_common = gt_adata[:, common_genes]
     pred_common = pred_adata[:, common_genes]
-    print(len(common_genes))
 
-    # 2) require expression in each adata
+    # 3) require expression in each adata (or only in gt when filter_by_gt=True)
     gt_nnz = _nnz_per_gene(gt_common.X)
-    pred_nnz = _nnz_per_gene(pred_common.X)
-    keep_mask = (gt_nnz >= min_expr_cells) & (pred_nnz >= min_expr_cells)
+    if filter_by_gt:
+        keep_mask = gt_nnz >= min_expr_cells
+    else:
+        pred_nnz = _nnz_per_gene(pred_common.X)
+        keep_mask = (gt_nnz >= min_expr_cells) & (pred_nnz >= min_expr_cells)
 
     if not np.any(keep_mask):
-        raise ValueError("No genes pass the expression filter in both adatas.")
+        raise ValueError("No genes pass the expression filter.")
 
     # 3) return filtered .X matrices and the kept gene names (same order)
     gt_X_filtered = gt_common[:, keep_mask].X
@@ -392,6 +405,7 @@ def soft_correlation(
     return_list=False,
     corr_type="pearson",
     gene_set=None,
+    filter_by_gt=False,
 ):
     """
     gt_expressions, pred_expressions: list or array of gene expression vectors (shape [num_cells, num_genes])
@@ -406,7 +420,7 @@ def soft_correlation(
     elif corr_type == "spearman":
         corr_fn = spearmanr
     gt_expressions, pred_expressions, genes = intersect_and_filter_X(
-        gt_adata, pred_adata, 1, gene_set
+        gt_adata, pred_adata, 1, gene_set, filter_by_gt=filter_by_gt
     )
     print(f"running soft_correlation on {len(genes)} genes")
     gt_positions = np.array(gt_positions)
@@ -517,6 +531,7 @@ def soft_f1(
     sample=None,
     return_list=False,
     gene_set=None,
+    filter_by_gt=False,
 ):
     """
     gt_expressions, pred_expressions: array of shape [num_cells, num_genes]
@@ -526,7 +541,7 @@ def soft_f1(
     sample: if provided, percentage of gt_positions to sample
     """
     gt_expressions, pred_expressions, genes = intersect_and_filter_X(
-        gt_adata, pred_adata, gene_set=gene_set
+        gt_adata, pred_adata, gene_set=gene_set, filter_by_gt=filter_by_gt
     )
     gt_positions = np.asarray(gt_positions)
     pred_positions = np.asarray(pred_positions)

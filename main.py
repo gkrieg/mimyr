@@ -164,6 +164,17 @@ def get_args():
         help="Percentage of samples to use for metric computation",
     )
     parser.add_argument(
+        "--metric_filter_by_gt",
+        action="store_true",
+        help="When filtering genes for expression metrics, keep genes expressed in gt only (ignoring pred)",
+    )
+    parser.add_argument(
+        "--metric_gene_set_file",
+        type=str,
+        default=None,
+        help="Path to a plain-text file with one gene name per line to use as the evaluation gene set (overrides the gene set from meta_info)",
+    )
+    parser.add_argument(
         "--out_csv",
         type=str,
         default="results/output.csv",
@@ -258,6 +269,10 @@ def get_args():
     parser.add_argument(
         "--expression_xyz_noise", action="store_true",
         help="Add noise to x,y,z coordinates during expression model training",
+    )
+    parser.add_argument(
+        "--expression_dropout", type=float, default=None,
+        help="Override checkpoint dropout value (e.g. 0.0 to disable dropout during finetuning)",
     )
     parser.add_argument(
         "--expression_adata2", type=str, default=None,
@@ -421,6 +436,7 @@ def main():
             val_split=0.0,  # data is pre-split by SliceDataLoader; this is informational only
             rebalance_only=args.expression_rebalance_only,
             eval_test=args.expression_eval_test,
+            dropout=args.expression_dropout,
         )
         _train_expression_model(expr_args)
         exit(0)
@@ -483,8 +499,9 @@ def main():
 
         pred = inf.run_inference(slice_data_loader.test_slices)
         print("Sending pred to evaluator...", pred)
-        res = Evaluator(cfg, metadata_dir=args.expression_metadata_dir).evaluate(
-            pred, slice_data_loader.test_slices[0], sample=args.metric_sampling
+        res = Evaluator(cfg, metadata_dir=args.expression_metadata_dir, gene_set_file=args.metric_gene_set_file).evaluate(
+            pred, slice_data_loader.test_slices[0], sample=args.metric_sampling,
+            filter_by_gt=args.metric_filter_by_gt,
         )
         res = {k: float(v) for k, v in res.items()}
 
