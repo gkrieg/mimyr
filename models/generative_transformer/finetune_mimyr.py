@@ -633,6 +633,7 @@ def train(args):
         "data_dir": args.data_dir,
         "meta_info": os.path.basename(args.meta_info),
         "zhuang_data_dir": getattr(args, "zhuang_data_dir", None),
+        "use_rq1_train": getattr(args, "use_rq1_train", False),
     }
     slice_loader = SliceDataLoader(
         mode=args.data_mode,

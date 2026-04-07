@@ -4,7 +4,7 @@
 
 # --- Paths ---
 # data_dir points to the local data/ folder for CCF CSV files used by rq3
-data_dir: /work/magroup/skrieger/tissue_generator/spencer_mimyr/data
+data_dir: /work/magroup/skrieger/tissue_generator/quantized_slices
 zhuang_data_dir: /work/magroup/skrieger/MERFISH_BICCN/processed_data
 diseased_data_dir: /work/magroup/skrieger/tissue_generator/CCF_registration/ccf_aligned_Trem2_5xFAD/cleaned_versions
 expression_metadata_dir: /work/magroup/skrieger/tissue_generator/spencer_gentran/generative_transformer/metadata
@@ -15,6 +15,7 @@ run_mode: train
 data_mode: rq3_v2_d1
 device: cuda
 skip_combined_fit: true
+use_rq1_train: true
 
 # --- Model checkpoints ---
 expression_model_checkpoint: /compute/oven-0-13/skrieger/TG-base-noreweight2/epoch100_model.pt

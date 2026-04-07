@@ -1,4 +1,5 @@
 import os
+import json
 import random
 import scanpy as sc
 import pandas as pd
@@ -60,7 +61,7 @@ class SliceDataLoader:
     ):
         """
         Args:
-            mode (str): data mode — one of rq1, rq2, rq2_v2, rq3, rq3_v2, rq3_v2_rq1, rq4, rq5
+            mode (str): data mode — one of rq1, rq2, rq2_v2, rq3, rq3_v2, rq3_v2_d*, rq4, rq5
             label (str): obs column to use as the cell-type label
             cfg (dict): full config dict (from argparse); must include data_dir and,
                 for Zhuang-based modes, zhuang_data_dir; for rq5, diseased_data_dir
@@ -82,6 +83,7 @@ class SliceDataLoader:
         self.gene_exp_model = None
         self.density_model = None
         self.cfg = cfg
+        print("data loader config: ",self.cfg)
 
     def load_intra_slices(self, fast=False, fast_select=None, select_indices=None):
         # Load only slices1
@@ -167,6 +169,68 @@ class SliceDataLoader:
         for s in slices1:
             s.obs["technology"] = "M550"
         return slices1
+
+    def _compute_rq1_train_indices_by_z_ccf(self, test_slices, rq1_eligible_indices):
+        """For each test slice, find the eligible rq1 slice with the closest mean z_ccf.
+
+        Reads eligible rq1 h5ad files in backed mode (obs only) to avoid loading the
+        full expression matrix.
+
+        Args:
+            test_slices: list of AnnData objects with obs["z_ccf"] already populated
+            rq1_eligible_indices: list of candidate rq1 positional indices
+
+        Returns:
+            sorted, deduplicated list of selected rq1 indices
+        """
+        input_dir = os.path.join(self.cfg["data_dir"], "subclass_z1_d338_0_rotated")
+        sorted_slices1 = [
+            "sec_05.h5ad", "sec_06.h5ad", "sec_08.h5ad", "sec_09.h5ad",
+            "sec_10.h5ad", "sec_11.h5ad", "sec_12.h5ad", "sec_13.h5ad",
+            "sec_14.h5ad", "sec_15.h5ad", "sec_16.h5ad", "sec_17.h5ad",
+            "sec_18.h5ad", "sec_19.h5ad", "sec_24.h5ad", "sec_25.h5ad",
+            "sec_26.h5ad", "sec_27.h5ad", "sec_28.h5ad", "sec_29.h5ad",
+            "sec_30.h5ad", "sec_31.h5ad", "sec_32.h5ad", "sec_33.h5ad",
+            "sec_35.h5ad", "sec_36.h5ad", "sec_37.h5ad", "sec_38.h5ad",
+            "sec_39.h5ad", "sec_40.h5ad", "sec_42.h5ad", "sec_43.h5ad",
+            "sec_44.h5ad", "sec_45.h5ad", "sec_46.h5ad", "sec_47.h5ad",
+            "sec_48.h5ad", "sec_49.h5ad", "sec_50.h5ad", "sec_51.h5ad",
+            "sec_52.h5ad", "sec_54.h5ad", "sec_55.h5ad", "sec_56.h5ad",
+            "sec_57.h5ad", "sec_58.h5ad", "sec_59.h5ad", "sec_60.h5ad",
+            "sec_61.h5ad", "sec_62.h5ad", "sec_64.h5ad", "sec_66.h5ad",
+            "sec_67.h5ad",
+        ]
+
+        print("rq3_v2_rq1: computing rq1 mean z_ccf for eligible slices...")
+        rq1_z_means = {}
+        rq1_y_means = {}
+        rq1_x_means = {}
+        for i in rq1_eligible_indices:
+            fname = sorted_slices1[i]
+            s = sc.read_h5ad(os.path.join(input_dir, fname), backed="r")
+            rq1_z_means[i] = float(s.obs["z_ccf"].mean())
+            rq1_y_means[i] = float(s.obs["y_ccf"].mean())
+            rq1_x_means[i] = float(s.obs["x_ccf"].mean())
+            s.file.close()
+        print(rq1_z_means)
+        print(rq1_y_means)
+        print(rq1_x_means)
+
+        selected = []
+        for ts in test_slices:
+            test_z = float(ts.obs["z_ccf"].mean())
+            test_y = float(ts.obs["y_ccf"].mean())
+            test_x = float(ts.obs["x_ccf"].mean())
+            nearest = min(rq1_eligible_indices, key=lambda i: abs(rq1_x_means[i] - test_x))
+            if nearest not in selected:
+                selected.append(nearest)
+            print(
+                f"  test z_ccf={test_z:.4f} → rq1[{nearest}] "
+                f"  test y_ccf={test_y:.4f}, test x_ccf={test_x:.4f}"
+                f"({sorted_slices1[nearest]}) z_ccf={rq1_x_means[nearest]:.4f}"
+            )
+
+        return sorted(selected)
 
     def load_zhuangn_slices(self, n=2, fast_select=None, remove_edges=True):
         print("Fast selecting", fast_select)
@@ -620,10 +684,42 @@ class SliceDataLoader:
             val_slices = [slices_tokenized[i] for i in val_indices]
 
             train_indices = [5, 15, 25, 35]
-            train_slices = [slices_tokenized[i] for i in train_indices]
-
             ref_indices = [5, 5, 5, 15, 15, 25, 25, 35, 35, 44]
             reference_slices = [slices_tokenized[i] for i in ref_indices]
+
+            train_slices = [slices_tokenized[i] for i in train_indices]
+
+            if self.cfg.get("use_rq1_train"):
+                # Supplement Zhuang training slices with rq1 slices whose mean x_ccf
+                # most closely matches each test slice.
+                n_rq1_slices = 53
+                rq1_train_eligible = list(range(n_rq1_slices))
+                test_key = "_".join(str(i) for i in sorted(test_indices))
+                cache_path = os.path.join(
+                    self.metadata_dir, f"train_indices_rq1_{test_key}.json"
+                )
+                if os.path.exists(cache_path):
+                    with open(cache_path) as f:
+                        train_indices_rq1 = json.load(f)
+                    print(
+                        f"rq3_v2+rq1: loaded rq1 train indices from cache "
+                        f"({cache_path}): {train_indices_rq1}"
+                    )
+                else:
+                    test_slices_for_matching = [slices_tokenized[i] for i in test_indices]
+                    train_indices_rq1 = self._compute_rq1_train_indices_by_z_ccf(
+                        test_slices_for_matching, rq1_train_eligible
+                    )
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    with open(cache_path, "w") as f:
+                        json.dump(train_indices_rq1, f)
+                    print(
+                        f"rq3_v2+rq1: computed rq1 train indices by x_ccf and saved to "
+                        f"{cache_path}: {train_indices_rq1}"
+                    )
+                rq1_slices_raw = self.load_intra_slices(select_indices=train_indices_rq1)
+                rq1_slices_tokenized = self._align_and_tokenize_slices(rq1_slices_raw)
+                train_slices.extend(rq1_slices_tokenized)
 
             train_slices, val_slices, test_slices, reference_slices = (
                 self._harmonize_slice_lists(
@@ -645,8 +741,44 @@ class SliceDataLoader:
             test_slices = [slices_tokenized[i] for i in test_indices]
             val_slices = [slices_tokenized[i] for i in val_indices]
 
+            # d-offset indices are always used for reference slices
             train_indices = [10 - d, 20 - d, 30 - d, 40 - d]
+
             train_slices = [slices_tokenized[i] for i in train_indices]
+
+            if self.cfg.get("use_rq1_train"):
+                # Supplement Zhuang training slices with rq1 slices whose mean x_ccf
+                # most closely matches each test slice.
+                n_rq1_slices = 53
+                rq1_train_eligible = list(range(n_rq1_slices))
+                test_key = "_".join(str(i) for i in sorted(test_indices))
+                cache_path = os.path.join(
+                    self.metadata_dir, f"train_indices_rq1_{test_key}.json"
+                )
+                if os.path.exists(cache_path):
+                    with open(cache_path) as f:
+                        train_indices_rq1 = json.load(f)
+                    print(
+                        f"rq3_v2_d{d}+rq1: loaded rq1 train indices from cache "
+                        f"({cache_path}): {train_indices_rq1}"
+                    )
+                else:
+                    test_slices_for_matching = [slices_tokenized[i] for i in test_indices]
+                    train_indices_rq1 = self._compute_rq1_train_indices_by_z_ccf(
+                        test_slices_for_matching, rq1_train_eligible
+                    )
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    with open(cache_path, "w") as f:
+                        json.dump(train_indices_rq1, f)
+                    print(
+                        f"rq3_v2_d{d}+rq1: computed rq1 train indices by x_ccf and saved to "
+                        f"{cache_path}: {train_indices_rq1}"
+                    )
+                
+                rq1_slices_raw = self.load_intra_slices(select_indices=train_indices_rq1)
+                rq1_slices_tokenized = self._align_and_tokenize_slices(rq1_slices_raw)
+                train_slices.extend(rq1_slices_tokenized)
+
 
             ref_indices = (
                 [train_indices[0]] * 3
@@ -656,58 +788,6 @@ class SliceDataLoader:
                 + [44]
             )
             reference_slices = [slices_tokenized[i] for i in ref_indices]
-
-            train_slices, val_slices, test_slices, reference_slices = (
-                self._harmonize_slice_lists(
-                    train_slices, val_slices, test_slices, reference_slices
-                )
-            )
-            self._set_slice_attributes(
-                train_slices, val_slices, test_slices, reference_slices
-            )
-
-        elif self.mode == "rq3_v2_rq1":
-            # Test/val from Zhuang-ABCA-2 (same split as rq3_v2).
-            # Training uses only the rq1 slices closest to each rq3_v2 test index.
-            # No reference slices are set since this mode is for training only.
-
-            # Configurable test indices (Zhuang-ABCA-2); default matches rq3_v2
-            raw = self.cfg.get("rq3_v2_rq1_test_indices")
-            if raw is not None:
-                if isinstance(raw, str):
-                    test_indices = [int(x.strip()) for x in raw.split(",")]
-                else:
-                    test_indices = list(raw)
-            else:
-                test_indices = [1, 10, 20, 30, 40]
-
-            # Determine which rq1 indices to load before reading any files
-            rq1_excluded = set(self._rq1_test_indices + self._rq1_val_indices)
-            n_rq1_slices = 54  # total slices in sorted_slices1
-            rq1_train_eligible = [
-                i for i in range(n_rq1_slices) if i not in rq1_excluded
-            ]
-            train_indices_rq1 = []
-            for ti in test_indices:
-                nearest = min(rq1_train_eligible, key=lambda i: abs(i - ti))
-                if nearest not in train_indices_rq1:
-                    train_indices_rq1.append(nearest)
-            train_indices_rq1.sort()
-            print(f"rq3_v2_rq1: loading rq1 indices {train_indices_rq1} "
-                  f"(closest to rq3_v2 test indices {test_indices})")
-
-            slices = self.load_zhuangn_slices(n=2)
-            slices_tokenized = self._align_and_tokenize_slices(slices)
-
-            rq1_slices_raw = self.load_intra_slices(select_indices=train_indices_rq1)
-            rq1_slices_tokenized = self._align_and_tokenize_slices(rq1_slices_raw)
-
-            val_indices = [44]
-            test_slices = [slices_tokenized[i] for i in test_indices]
-            val_slices = [slices_tokenized[i] for i in val_indices]
-            # rq1 slices are loaded in index order; map back positionally
-            train_slices = rq1_slices_tokenized
-            reference_slices = []
 
             train_slices, val_slices, test_slices, reference_slices = (
                 self._harmonize_slice_lists(

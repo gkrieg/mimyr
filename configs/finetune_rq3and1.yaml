@@ -12,9 +12,10 @@ meta_info: /work/magroup/skrieger/tissue_generator/MERFISH_aging/4hierarchy_meta
 
 # --- Job settings ---
 run_mode: train
-data_mode: rq3_v2_rq1
+data_mode: rq3_v2
 device: cuda
 skip_combined_fit: true
+use_rq1_train: true
 
 # --- Model checkpoints ---
 expression_model_checkpoint: /compute/oven-0-13/skrieger/TG-base-noreweight2/epoch100_model.pt

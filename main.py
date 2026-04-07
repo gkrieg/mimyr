@@ -388,6 +388,7 @@ def main():
             data_label=args.data_label,
             data_dir=args.data_dir,
             zhuang_data_dir=args.zhuang_data_dir,
+            use_rq1_train=getattr(args, "use_rq1_train", False),
             adata2=args.expression_adata2,
             metadata_dir=args.expression_metadata_dir,
             # training hyperparams
