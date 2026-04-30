@@ -58,6 +58,7 @@ class SliceDataLoader:
         label="subclass",
         cfg=None,
         metadata_dir="model_checkpoints/metadata",
+        omit_x=False,
     ):
         """
         Args:
@@ -83,6 +84,7 @@ class SliceDataLoader:
         self.gene_exp_model = None
         self.density_model = None
         self.cfg = cfg
+        self.omit_x = omit_x
         print("data loader config: ",self.cfg)
 
     def load_intra_slices(self, fast=False, fast_select=None, select_indices=None):
@@ -354,6 +356,11 @@ class SliceDataLoader:
             harmonize_dataset(s, meta_info, edges, **harmonize_kwargs)
             for s in reference_slices
         ]
+
+        if self.omit_x:
+            for s in harmonized_train + harmonized_val + harmonized_test + harmonized_ref:
+                if "<x>" in s.obs.columns:
+                    del s.obs["<x>"]
 
         return harmonized_train, harmonized_val, harmonized_test, harmonized_ref
 
@@ -855,6 +862,35 @@ class SliceDataLoader:
                 train_slices, val_slices, test_slices, reference_slices
             )
 
+        elif self.mode == "rq3_v2_d1_cellval":
+            slices = self.load_zhuangn_slices(n=2)
+            slices_tokenized = self._align_and_tokenize_slices(slices)
+
+            test_indices = [1, 10, 20, 30, 40]
+            pool_indices = [9, 19, 29, 39, 44]
+
+            test_slices = [slices_tokenized[i] for i in test_indices]
+
+            pool_combined = sc.concat(
+                [slices_tokenized[i] for i in pool_indices], join="outer"
+            )
+            pool_combined.obs_names_make_unique()
+            train_mask = np.random.rand(pool_combined.n_obs) < 0.9
+            train_slices = [pool_combined[train_mask].copy()]
+            val_slices = [pool_combined[~train_mask].copy()]
+
+            ref_indices = [9] * 3 + [19] * 2 + [29] * 2 + [39] * 2 + [44]
+            reference_slices = [slices_tokenized[i] for i in ref_indices]
+
+            train_slices, val_slices, test_slices, reference_slices = (
+                self._harmonize_slice_lists(
+                    train_slices, val_slices, test_slices, reference_slices
+                )
+            )
+            self._set_slice_attributes(
+                train_slices, val_slices, test_slices, reference_slices
+            )
+
         elif self.mode == "rq4_rq3":
             slices = self.load_zhuangn_slices(n=3, remove_edges=False)
             slices_tokenized = self._align_and_tokenize_slices(slices)
@@ -925,6 +961,45 @@ class SliceDataLoader:
 
             ref_indices = [0, 3]
             reference_slices = [slices_tokenized[i] for i in ref_indices]
+
+            train_slices, val_slices, test_slices, reference_slices = (
+                self._harmonize_slice_lists(
+                    train_slices, val_slices, test_slices, reference_slices
+                )
+            )
+            self._set_slice_attributes(
+                train_slices, val_slices, test_slices, reference_slices
+            )
+
+        elif self.mode == "base_zhuang1":
+            slices = self.load_zhuangn_slices(n=1)
+            slices_tokenized = self._align_and_tokenize_slices(slices)
+            del slices
+            for sid, s in enumerate(slices_tokenized):
+                s.obs["slice_id"] = sid
+
+            test_indices = [14, 43, 71, 100, 128]
+            val_indices = [28, 57, 85, 114]
+
+            test_slices = [slices_tokenized[i] for i in test_indices]
+            val_slices = [slices_tokenized[i] for i in val_indices]
+
+            train_indices = [
+                i
+                for i in range(len(slices_tokenized))
+                if i not in test_indices and i not in val_indices
+            ]
+            train_slices = [slices_tokenized[i] for i in train_indices]
+
+            ref_indices = []
+            for i in test_indices:
+                if i - 1 >= 0:
+                    ref_indices.append(i - 1)
+                if i + 1 < len(slices_tokenized):
+                    ref_indices.append(i + 1)
+            ref_indices = sorted(set(ref_indices))
+            reference_slices = [slices_tokenized[i] for i in ref_indices]
+            del slices_tokenized
 
             train_slices, val_slices, test_slices, reference_slices = (
                 self._harmonize_slice_lists(

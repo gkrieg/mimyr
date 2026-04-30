@@ -141,6 +141,9 @@ class MimyrModel_kv(nn.Module):
             )
         )
 
+        if config.continuous_coords:
+            self.coord_embed = nn.Linear(1, config.n_embd)
+
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.epx_head = nn.Linear(
             config.n_embd, config.expression_level + 1, bias=False
@@ -275,6 +278,14 @@ class MimyrModel_kv(nn.Module):
             tok_emb = inputs_embeds
 
         expr_emb = self.transformer.wee(x_expr)
+        if self.config.continuous_coords and self.config.coord_token_ids and idx is not None:
+            coord_ids = torch.tensor(
+                self.config.coord_token_ids, dtype=torch.long, device=idx.device
+            )
+            coord_mask = (idx.unsqueeze(-1) == coord_ids).any(-1)  # (B, T)
+            coord_vals = x_expr.float() / self.config.expression_level
+            coord_embs = self.coord_embed(coord_vals.unsqueeze(-1))  # (B, T, n_embd)
+            expr_emb = torch.where(coord_mask.unsqueeze(-1), coord_embs, expr_emb)
         x = self.transformer.drop(tok_emb + expr_emb)
 
         presents_kv = []

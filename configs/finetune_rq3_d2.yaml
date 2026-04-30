@@ -19,16 +19,20 @@ use_rq1_train: true
 
 # --- Model checkpoints ---
 expression_model_checkpoint: /compute/oven-0-13/skrieger/TG-base-noreweight2/epoch100_model.pt
-expression_output_dir: /compute/oven-0-13/skrieger/Zhuang-2-v2_d2
+expression_output_dir: /compute/oven-0-13/skrieger/Zhuang-2-v2_d2-test
 expression_from_finetuned: true
 
 # --- Training hyperparameters ---
 expression_batch_size: 128
 expression_max_len: 500
-expression_no_shuffle: true
-expression_epochs: 120
-expression_lr: 0.0005
+expression_no_shuffle: false
+expression_epochs: 1000
+expression_lr: 0.001
 expression_lambda_val: 0.1
 expression_new_expression_size: 100
 expression_save_frequency: 2
 expression_xyz_noise: true
+
+# --- Test evaluation ---
+expression_eval_test: true
+expression_verbose_eval: true

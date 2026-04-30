@@ -122,6 +122,9 @@ class MimyrConfig:
     expression_level: int = 10
     ele: int = 0
     bin_edges: np.ndarray = None
+    hidden_regressor: bool = False  # if True, regressor takes transformer hidden state instead of bin logits
+    continuous_coords: bool = False  # if True, <x>/<y>/<z> use a linear projection instead of the discrete wee lookup
+    coord_token_ids: list = None  # token IDs for <x>, <y>, <z>; set from tokenizer at init time
 
 
 class MimyrModel(nn.Module):
@@ -147,17 +150,19 @@ class MimyrModel(nn.Module):
             )
         )
 
+        if config.continuous_coords:
+            self.coord_embed = nn.Linear(1, config.n_embd)
+
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.epx_head = nn.Linear(
             config.n_embd, config.expression_level + 1, bias=False
         )  # +1 for 0 bin
 
+        regressor_input_dim = config.n_embd if config.hidden_regressor else config.expression_level + 1
         self.epx_regressor = nn.Sequential(
-            nn.Linear(
-                config.expression_level + 1, config.n_embd
-            ),  # map bin logits → hidden
+            nn.Linear(regressor_input_dim, config.n_embd),
             nn.ReLU(),
-            nn.Linear(config.n_embd, 1),  # hidden → real
+            nn.Linear(config.n_embd, 1),
         )
 
         if "LOCAL_RANK" not in os.environ or os.environ["LOCAL_RANK"] == "0":
@@ -220,8 +225,9 @@ class MimyrModel(nn.Module):
 
         self.epx_head = nn.Linear(emb_dim, new_num, bias=False)
 
+        regressor_input_dim = self.config.n_embd if self.config.hidden_regressor else new_num
         self.epx_regressor = nn.Sequential(
-            nn.Linear(new_num, self.config.n_embd),  # map new bin logits → hidden
+            nn.Linear(regressor_input_dim, self.config.n_embd),
             nn.ReLU(),
             nn.Linear(self.config.n_embd, 1),
         )
@@ -246,6 +252,14 @@ class MimyrModel(nn.Module):
             tok_emb = inputs_embeds
 
         expr_emb = self.transformer.wee(x_expr)
+        if self.config.continuous_coords and self.config.coord_token_ids:
+            coord_ids = torch.tensor(
+                self.config.coord_token_ids, dtype=torch.long, device=idx.device
+            )
+            coord_mask = (idx.unsqueeze(-1) == coord_ids).any(-1)  # (B, T)
+            coord_vals = x_expr.float() / self.config.expression_level  # normalize bin to [0, 1]
+            coord_embs = self.coord_embed(coord_vals.unsqueeze(-1))  # (B, T, n_embd)
+            expr_emb = torch.where(coord_mask.unsqueeze(-1), coord_embs, expr_emb)
         x = self.transformer.drop(tok_emb + expr_emb)
 
         for block in self.transformer.h:
@@ -254,7 +268,8 @@ class MimyrModel(nn.Module):
 
         logits_labels = self.lm_head(x)  # (B, T, vocab_size)
         logits_exp_bins = self.epx_head(x)  # (B, T, num_bins)
-        logits_exp_real = self.epx_regressor(logits_exp_bins)  # (B, T, 1)
+        regressor_input = x if self.config.hidden_regressor else logits_exp_bins
+        logits_exp_real = self.epx_regressor(regressor_input)  # (B, T, 1)
 
         loss = loss_cls = loss_exp_bin = loss_exp_real = None
         eos_token_id = 0
@@ -393,7 +408,14 @@ class MimyrModel(nn.Module):
 
                 shift_pred = pred_vals[:, :-1].contiguous()
                 shift_true = true_vals[:, 1:].contiguous()
-                loss_exp_real = F.mse_loss(shift_pred, shift_true, reduction="mean")
+                # Mask out prompt and padding positions (same mask as loss_exp_bin)
+                real_mask = targets[:, 1:] != -100  # (B, T-1)
+                if real_mask.any():
+                    loss_exp_real = F.mse_loss(
+                        shift_pred[real_mask], shift_true[real_mask], reduction="mean"
+                    )
+                else:
+                    loss_exp_real = torch.tensor(0.0, device=shift_pred.device)
 
         # Final loss
         if (

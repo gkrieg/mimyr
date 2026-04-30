@@ -317,6 +317,22 @@ def evaluate_expression_metrics(
         f1s.append(float(f1))
         if b == 0 and verbose == True:
             print("\n================ DEBUG: Cell 0 ================")
+            if "input_ids" in batch:
+                input_ids_b0 = batch["input_ids"][0]
+                if hasattr(input_ids_b0, "detach"):
+                    input_ids_b0 = input_ids_b0.detach().cpu().numpy()
+                else:
+                    input_ids_b0 = np.asarray(input_ids_b0)
+                prompt_mask = labels_np[0] == mask_token_id
+                prompt_ids = input_ids_b0[prompt_mask]
+                prompt_tokens = tokenizer.convert_ids_to_tokens(prompt_ids.tolist())
+                prompt_vals = batch["input_vals"][0][prompt_mask]
+                print(f"prompt token ids ({len(prompt_ids)} tokens):")
+                print(prompt_ids)
+                print("prompt tokens:")
+                print(prompt_tokens)
+                print("prompt vals:")
+                print(prompt_vals)
             print("labels")
             print(lab)
             print("gene token ids")
@@ -360,6 +376,76 @@ def evaluate_expression_metrics(
             print("================================================\n")
 
     return pearson_rs, f1s, precisions, recalls
+
+
+def _remap_x_to_test_distribution(adata_train: AnnData, adata_test: AnnData, seed: int = 42) -> None:
+    """
+    Slice-aware stochastic remap of training <x> bins to test <x> bins.
+
+    Each coronal slice spans a small range of x_bins (not a single value).
+    The original global nearest-neighbor remap collapsed multiple training
+    x_bins to a few test x_bins, leaving most of each test slice's range OOD.
+
+    This version:
+      1. Auto-detects slice groups by finding large gaps in sorted unique x_bins.
+      2. Matches training groups to test groups via linear_sum_assignment.
+      3. Randomly samples new x_bins from the full target test slice range.
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    rng = np.random.default_rng(seed)
+
+    def _detect_slice_groups(xbins, min_gap_multiplier=2.0):
+        unique = np.sort(np.unique(xbins))
+        if len(unique) < 2:
+            return [unique]
+        diffs = np.diff(unique)
+        threshold = diffs.mean() * min_gap_multiplier
+        boundaries = np.where(diffs >= threshold)[0] + 1
+        return np.split(unique, boundaries)
+
+    train_groups = _detect_slice_groups(adata_train.obs["<x>"].values.astype(int))
+    test_groups  = _detect_slice_groups(adata_test.obs["<x>"].values.astype(int))
+
+    print(f"  Detected {len(train_groups)} train slice x_bin groups: {[g.tolist() for g in train_groups]}")
+    print(f"  Detected {len(test_groups)}  test  slice x_bin groups: {[g.tolist() for g in test_groups]}")
+
+    train_means = np.array([g.mean() for g in train_groups])
+    test_means  = np.array([g.mean() for g in test_groups])
+
+    cost = np.abs(train_means[:, None] - test_means[None, :])
+    row_ind, col_ind = linear_sum_assignment(cost)
+
+    print(f"\n  Optimal training→test assignment (total cost {cost[row_ind, col_ind].sum():.2f}):")
+
+    new_x = adata_train.obs["<x>"].values.astype(int).copy()
+    train_xbin = adata_train.obs["<x>"].values.astype(int)
+    matched_test_groups = set(col_ind)
+
+    for r, c in zip(row_ind, col_ind):
+        tr_grp = train_groups[r]
+        te_grp = test_groups[c]
+        mask = np.isin(train_xbin, tr_grp)
+        n = mask.sum()
+        new_x[mask] = rng.choice(te_grp, size=n, replace=True)
+        print(f"    train {tr_grp.tolist()} (mean={train_means[r]:.1f}, n={n})"
+              f" → test {te_grp.tolist()} (mean={test_means[c]:.1f})")
+
+    adata_train.obs["<x>"] = new_x
+
+    unmatched = [i for i in range(len(test_groups)) if i not in matched_test_groups]
+    if unmatched:
+        print(f"\n  Warning: {len(unmatched)} test slice group(s) have no matched training slice:")
+        for i in unmatched:
+            print(f"    {test_groups[i].tolist()} (mean={test_means[i]:.1f}) — x_bins remain OOD")
+    else:
+        print("\n  All test slice groups are covered.")
+
+    train_x_after = np.unique(new_x)
+    test_x_all = np.unique(adata_test.obs["<x>"].values.astype(int))
+    uncovered = np.setdiff1d(test_x_all, train_x_after)
+    print(f"\n  Train x_bins after remap ({len(train_x_after)}): {train_x_after.tolist()}")
+    print(f"  Uncovered test x_bins ({len(uncovered)}): {uncovered.tolist()}")
 
 
 def get_parser():
@@ -533,6 +619,57 @@ def get_parser():
         default=None,
         help="Override the dropout value from the checkpoint model_args (e.g. 0.0 to disable dropout)",
     )
+    parser.add_argument(
+        "--verbose-eval",
+        action="store_true",
+        help="Print detailed per-gene debug output for one batch per epoch during training evaluation",
+    )
+    parser.add_argument(
+        "--hidden-regressor",
+        action="store_true",
+        help="Feed transformer hidden state (n_embd) into epx_regressor instead of bin logits",
+    )
+    parser.add_argument(
+        "--remap-x-to-test",
+        action="store_true",
+        help=(
+            "Before training, remap each training cell's binned <x> value to the nearest "
+            "binned <x> value present in the test slices. Requires the data mode to have "
+            "a test split (slice_loader.adata_test must be non-None)."
+        ),
+    )
+    parser.add_argument(
+        "--save-per-cell-metrics",
+        action="store_true",
+        help=(
+            "After each test evaluation epoch, save a CSV with per-cell Pearson r "
+            "and obs metadata (cluster, x_ccf, y_ccf, z_ccf, x_bin, y_bin, z_bin) "
+            "to <output_dir>/per_cell_metrics_epoch<N>.csv. Useful for generalization "
+            "gap analysis."
+        ),
+    )
+    parser.add_argument(
+        "--omit-x",
+        action="store_true",
+        help="Omit the x_ccf coordinate from aligned_spatial in the anndatas",
+    )
+    parser.add_argument(
+        "--continuous-coords",
+        action="store_true",
+        help=(
+            "Use a linear projection for <x>/<y>/<z> coordinate tokens instead of "
+            "the discrete wee embedding table, so coordinate values generalise continuously."
+        ),
+    )
+    parser.add_argument(
+        "--preprocess-only",
+        action="store_true",
+        help=(
+            "Preprocess and cache train.h5ad / val.h5ad to output_dir, then exit without "
+            "training. If the cache files already exist, exits immediately. Run this "
+            "single-threaded before the multi-GPU training job to avoid OOM during data prep."
+        ),
+    )
 
     return parser
 
@@ -552,6 +689,14 @@ def train(args):
     else:
         rank = 0
         device = torch.device(args.device)
+
+    # Fast early exit: if --preprocess-only and cache already exists, nothing to do.
+    _train_cache = os.path.join(args.output_dir, "train.h5ad")
+    _val_cache = os.path.join(args.output_dir, "val.h5ad")
+    if getattr(args, "preprocess_only", False) and os.path.exists(_train_cache) and os.path.exists(_val_cache):
+        if rank == 0:
+            print(f"Cache already exists at {args.output_dir} (train.h5ad + val.h5ad). Nothing to do.")
+        return
 
     # 1) Load pretrained checkpoint
     if args.ckp_path is not None:
@@ -604,6 +749,10 @@ def train(args):
         ckp["model_args"]["expression_level"] = args.new_expression_size
     if args.dropout is not None:
         ckp["model_args"]["dropout"] = args.dropout
+    if getattr(args, "hidden_regressor", False):
+        ckp["model_args"]["hidden_regressor"] = True
+    if getattr(args, "continuous_coords", False):
+        ckp["model_args"]["continuous_coords"] = True
     gptconf = MimyrConfig(**ckp["model_args"])
     print(gptconf)
     ModelClass = MimyrModel
@@ -632,36 +781,74 @@ def train(args):
             model.config.expression_level = args.new_expression_size
             ckp["model_args"]["expression_level"] = args.new_expression_size
 
+    if ckp["model_args"].get("continuous_coords"):
+        coord_token_ids = tokenizer.convert_tokens_to_ids(["<x>", "<y>", "<z>"])
+        ckp["model_args"]["coord_token_ids"] = coord_token_ids
+        model.config.coord_token_ids = coord_token_ids
+
     print("initialized model", flush=True)
 
-    # 4) Load train/val AnnData from data_loader
+    # 4) Load train/val AnnData from data_loader (or cache if available)
+    import scanpy as _sc
     from data_loader import SliceDataLoader
 
-    cfg = {
-        "data_dir": args.data_dir,
-        "meta_info": os.path.basename(args.meta_info),
-        "zhuang_data_dir": getattr(args, "zhuang_data_dir", None),
-        "use_rq1_train": getattr(args, "use_rq1_train", False),
-    }
-    slice_loader = SliceDataLoader(
-        mode=args.data_mode,
-        label=args.data_label,
-        cfg=cfg,
-        metadata_dir=args.metadata_dir,
-    )
-    slice_loader.prepare(
-        adata2_path=args.adata2,
-        gene_set=meta_info.get("gene_set"),
-        seed=args.seed,
-        dummy=args.dummy,
-        sampling_col=args.sampling_col,
-        output_dir=args.output_dir,
-        rank=rank,
-    )
+    train_cache = os.path.join(args.output_dir, "train.h5ad")
+    val_cache = os.path.join(args.output_dir, "val.h5ad")
+    cache_exists = os.path.exists(train_cache) and os.path.exists(val_cache)
 
-    adata_train = slice_loader.adata_train
-    adata_val = slice_loader.adata_val
-    adata_test = slice_loader.adata_test if args.eval_test else None
+    if cache_exists:
+        if rank == 0:
+            print(f"Loading preprocessed adata from cache in {args.output_dir}")
+        adata_train = _sc.read_h5ad(train_cache)
+        adata_val = _sc.read_h5ad(val_cache)
+        adata_test = None
+    else:
+        cfg = {
+            "data_dir": args.data_dir,
+            "meta_info": os.path.basename(args.meta_info),
+            "zhuang_data_dir": getattr(args, "zhuang_data_dir", None),
+            "use_rq1_train": getattr(args, "use_rq1_train", False),
+        }
+        slice_loader = SliceDataLoader(
+            mode=args.data_mode,
+            label=args.data_label,
+            cfg=cfg,
+            metadata_dir=args.metadata_dir,
+            omit_x=getattr(args, "omit_x", False),
+        )
+        slice_loader.prepare(
+            adata2_path=args.adata2,
+            gene_set=meta_info.get("gene_set"),
+            seed=args.seed,
+            dummy=args.dummy,
+            sampling_col=args.sampling_col,
+            output_dir=args.output_dir,
+            rank=rank,
+        )
+        adata_train = slice_loader.adata_train
+        adata_val = slice_loader.adata_val
+        adata_test = slice_loader.adata_test if args.eval_test else None
+
+        if rank == 0:
+            # _build_adata writes train.h5ad when adata2 is set; write it here if not already done
+            if not os.path.exists(train_cache):
+                adata_train.write(train_cache)
+            adata_val.write(val_cache)
+            print(f"Cached preprocessed adata to {args.output_dir}")
+
+    if getattr(args, "preprocess_only", False):
+        if rank == 0:
+            print("--preprocess-only: data cached, exiting before training.")
+        return
+
+    if getattr(args, "remap_x_to_test", False):
+        remap_test_adata = slice_loader.adata_test
+        if remap_test_adata is None:
+            raise ValueError(
+                "--remap-x-to-test requires the data mode to provide a test split, "
+                "but slice_loader.adata_test is None."
+            )
+        _remap_x_to_test_distribution(adata_train, remap_test_adata)
 
     args.use_sampling_probs = not args.disable_sampling_probs
     if args.rebalance_only:
@@ -800,6 +987,7 @@ def train(args):
         total_loss, total_cls, total_exp_bin, total_exp_real = 0.0, 0.0, 0.0, 0.0
         all_train_pearson_rs = []
         all_train_f1, all_train_prec, all_train_rec = [], [], []
+        verbose_done_this_epoch = False
         for step, batch in enumerate(tqdm(train_loader, desc=f"Epoch {epoch} [train]")):
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
@@ -838,6 +1026,7 @@ def train(args):
             if rank == 0:
                 if step % args.log_per_steps == 0:
                     with torch.no_grad():
+                        do_verbose = getattr(args, "verbose_eval", False) and not verbose_done_this_epoch
                         pearson_rs_train, f1s, precs, recs = (
                             evaluate_expression_metrics(
                                 adata=adata_train,
@@ -849,8 +1038,11 @@ def train(args):
                                 var_names=adata_train.var_names.tolist(),
                                 labels=labels,  # tensor on device is fine; fn handles .detach().cpu()
                                 mask_token_id=-100,
+                                verbose=do_verbose,
                             )
                         )
+                        if do_verbose:
+                            verbose_done_this_epoch = True
                         mean_train_pearson_r = (
                             float(np.mean(pearson_rs_train))
                             if len(pearson_rs_train)
@@ -995,6 +1187,7 @@ def train(args):
             t_loss, t_cls, t_exp_bin, t_exp_real, t_count = 0.0, 0.0, 0.0, 0.0, 0
             all_test_pearson_rs = []
             all_test_f1, all_test_prec, all_test_rec = [], [], []
+            all_test_cell_idxs = []
             with torch.no_grad():
                 for batch in tqdm(test_loader, desc=f"Epoch {epoch} [test]"):
                     input_ids = batch["input_ids"].to(device)
@@ -1034,6 +1227,10 @@ def train(args):
                     all_test_f1.extend(f1s)
                     all_test_prec.extend(precs)
                     all_test_rec.extend(recs)
+                    idxs = batch.get("idx", [])
+                    all_test_cell_idxs.extend(
+                        idxs.tolist() if hasattr(idxs, "tolist") else list(idxs)
+                    )
 
             avg_t_loss = t_loss / t_count
             avg_t_cls = t_cls / t_count
@@ -1063,6 +1260,18 @@ def train(args):
                         "test/recall": mean_test_rec,
                     }
                 )
+                if getattr(args, "save_per_cell_metrics", False) and adata_test is not None:
+                    meta_cols = [c for c in ["cluster", "x_ccf", "y_ccf", "z_ccf", "<x>", "<y>", "<z>", "slice_idx"]
+                                 if c in adata_test.obs.columns]
+                    pcm = pd.DataFrame({
+                        "cell_idx": all_test_cell_idxs,
+                        "pearson_r": all_test_pearson_rs,
+                    })
+                    for col in meta_cols:
+                        pcm[col] = adata_test.obs[col].iloc[all_test_cell_idxs].values
+                    pcm_path = os.path.join(args.output_dir, f"per_cell_metrics_epoch{epoch}.csv")
+                    pcm.to_csv(pcm_path, index=False)
+                    print(f"  Saved per-cell metrics → {pcm_path}")
 
         # Log all epoch-level metrics (train + val + test) in one call so they share the same W&B step
         if rank == 0:

@@ -108,6 +108,7 @@ class _AnndataGenDataset(Dataset):
             "attention_mask": attention_mask,
             "input_vals": input_vals,
             "target_vals": target_vals,
+            "idx": idx,
         }
 
 

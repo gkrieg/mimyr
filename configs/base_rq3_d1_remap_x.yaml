@@ -1,9 +1,8 @@
-# Expression model finetuning (rq3_v2)
-# ======================================
-# Usage: torchrun --nproc_per_node=2 --master_port $port main.py --config configs/finetune_rq3.yaml
+# Expression model finetuning (rq3_v2_d1) with x-axis remapped to test distribution
+# =====================================================================================
+# Usage: torchrun --nproc_per_node=2 --master_port $port main.py --config configs/base_rq3_d1_remap_x.yaml
 
 # --- Paths ---
-# data_dir points to the local data/ folder for CCF CSV files used by rq3
 data_dir: /work/magroup/skrieger/tissue_generator/quantized_slices
 zhuang_data_dir: /work/magroup/skrieger/MERFISH_BICCN/processed_data
 diseased_data_dir: /work/magroup/skrieger/tissue_generator/CCF_registration/ccf_aligned_Trem2_5xFAD/cleaned_versions
@@ -15,12 +14,10 @@ run_mode: train
 data_mode: rq3_v2_d1
 device: cuda
 skip_combined_fit: true
-use_rq1_train: true
 
 # --- Model checkpoints ---
-expression_model_checkpoint: /compute/oven-0-13/skrieger/TG-base-noreweight2/epoch100_model.pt
-expression_output_dir: /compute/oven-0-13/skrieger/Zhuang-2-v2_d1-test
-expression_from_finetuned: true
+expression_output_dir: /compute/oven-0-13/skrieger/Zhuang-2-v2_d1-test-base-remap-x
+expression_from_finetuned: false
 
 # --- Training hyperparameters ---
 expression_batch_size: 128
@@ -36,3 +33,6 @@ expression_xyz_noise: true
 # --- Test evaluation ---
 expression_eval_test: true
 expression_verbose_eval: true
+
+# --- Domain adaptation ---
+expression_remap_x_to_test: true

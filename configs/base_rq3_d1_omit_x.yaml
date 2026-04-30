@@ -15,12 +15,11 @@ run_mode: train
 data_mode: rq3_v2_d1
 device: cuda
 skip_combined_fit: true
-use_rq1_train: true
+omit_x: true
 
 # --- Model checkpoints ---
-expression_model_checkpoint: /compute/oven-0-13/skrieger/TG-base-noreweight2/epoch100_model.pt
-expression_output_dir: /compute/oven-0-13/skrieger/Zhuang-2-v2_d1-test
-expression_from_finetuned: true
+expression_output_dir: /compute/oven-0-13/skrieger/Zhuang-2-v2_d1-test-base-omit-x
+expression_from_finetuned: false
 
 # --- Training hyperparameters ---
 expression_batch_size: 128

@@ -78,6 +78,9 @@ def get_args():
         "--data_mode", type=str, default="rq1", help="Mode for SliceDataLoader"
     )
     parser.add_argument(
+        "--omit_x", action="store_true", help="Omit x_ccf coordinate from aligned_spatial"
+    )
+    parser.add_argument(
         "--data_label",
         type=str,
         default="cluster",
@@ -300,6 +303,30 @@ def get_args():
         "--expression_eval_test", action="store_true",
         help="Also evaluate on the test split each epoch alongside validation",
     )
+    parser.add_argument(
+        "--expression_verbose_eval", action="store_true",
+        help="Print detailed per-gene debug output for one batch per epoch during training evaluation",
+    )
+    parser.add_argument(
+        "--expression_hidden_regressor", action="store_true",
+        help="Feed transformer hidden state into epx_regressor instead of bin logits",
+    )
+    parser.add_argument(
+        "--expression_remap_x_to_test", action="store_true",
+        help="Remap training <x> bins to the nearest <x> value seen in test slices before training",
+    )
+    parser.add_argument(
+        "--expression_continuous_coords", action="store_true",
+        help="Use a linear projection for <x>/<y>/<z> tokens instead of the discrete wee embedding",
+    )
+    parser.add_argument(
+        "--expression_save_per_cell_metrics", action="store_true",
+        help="Save per-cell Pearson r and obs metadata CSV after each test evaluation epoch",
+    )
+    parser.add_argument(
+        "--expression_preprocess_only", action="store_true",
+        help="Cache train.h5ad/val.h5ad to output_dir and exit without training. No-op if cache exists.",
+    )
 
     # Two-pass: extract --config first, load YAML, set as new defaults, then re-parse
     # so that explicit CLI flags still take precedence over the config file.
@@ -316,8 +343,25 @@ def get_args():
 
 # ----------------- util -----------------
 def write_row(row, path):
-    header = not os.path.isfile(path)
-    pd.DataFrame([row]).to_csv(path, mode="a", header=header, index=False)
+    if not os.path.isfile(path):
+        pd.DataFrame([row]).to_csv(path, index=False)
+        return
+
+    existing = pd.read_csv(path)
+    existing_cols = set(existing.columns)
+    new_cols = set(row.keys())
+
+    # Add missing columns to existing rows (blank) and rewrite
+    for col in new_cols - existing_cols:
+        existing[col] = None
+    # Fill missing keys in the new row with None
+    new_row = {col: row.get(col, None) for col in existing.columns}
+    # Add any new columns not yet in existing
+    for col in new_cols - existing_cols:
+        new_row[col] = row[col]
+
+    updated = pd.concat([existing, pd.DataFrame([new_row])], ignore_index=True)
+    updated.to_csv(path, index=False)
 
 
 def already_done(cfg, path):
@@ -326,7 +370,9 @@ def already_done(cfg, path):
     existing_cols = pd.read_csv(path, nrows=0).columns.tolist()
     check_cols = [k for k in cfg.keys() if k in existing_cols]
     df = pd.read_csv(path, usecols=check_cols)
-    return any((df == pd.Series({k: cfg[k] for k in check_cols})).all(axis=1))
+    row = pd.Series({k: cfg[k] for k in check_cols})
+    df, row = df.align(row, axis=1)
+    return any((df == row).all(axis=1))
 
 
 # ----------------- main -----------------
@@ -356,6 +402,7 @@ def main():
         label=args.data_label,
         cfg=copy.deepcopy(cfg),
         metadata_dir=args.expression_metadata_dir,
+        omit_x=args.omit_x,
     )
 
     cfg["full_gene_panel"] = True
@@ -437,6 +484,13 @@ def main():
             rebalance_only=args.expression_rebalance_only,
             eval_test=args.expression_eval_test,
             dropout=args.expression_dropout,
+            verbose_eval=args.expression_verbose_eval,
+            hidden_regressor=args.expression_hidden_regressor,
+            remap_x_to_test=getattr(args, "expression_remap_x_to_test", False),
+            continuous_coords=getattr(args, "expression_continuous_coords", False),
+            omit_x=getattr(args, "omit_x", False),
+            save_per_cell_metrics=getattr(args, "expression_save_per_cell_metrics", False),
+            preprocess_only=getattr(args, "expression_preprocess_only", False),
         )
         _train_expression_model(expr_args)
         exit(0)
