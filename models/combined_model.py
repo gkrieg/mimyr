@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from models.diffusion_model import DDPMTrainer
 from models.celltype_model import SkeletonCelltypeModel2
+from data_loader import _read_slice
 import torch
 
 @dataclass
@@ -57,12 +58,12 @@ class CombinedModel:
         training_adata = []
         val_adata = []
         for file in os.listdir(training_adata_dir):
-            if file.endswith(".h5ad"):
-                adata = sc.read_h5ad(os.path.join(training_adata_dir, file))
+            if file.endswith((".h5ad", ".slaf")):
+                adata = _read_slice(os.path.join(training_adata_dir, file))
                 training_adata.append(adata)
         for file in os.listdir(val_adata_dir):
-            if file.endswith(".h5ad"):
-                adata = sc.read_h5ad(os.path.join(val_adata_dir, file))
+            if file.endswith((".h5ad", ".slaf")):
+                adata = _read_slice(os.path.join(val_adata_dir, file))
                 val_adata.append(adata)
 
         training_adata = sc.concat(training_adata)

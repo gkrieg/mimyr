@@ -10,6 +10,49 @@ from models.generative_transformer.data_util import harmonize_dataset
 import torch
 
 
+def _read_slice(path: str, backed: bool = False):
+    """Read a slice file, auto-detecting .slaf or .h5ad format.
+
+    If the literal path does not exist, tries swapping the extension between
+    .slaf and .h5ad, so hardcoded filename lists work regardless of which
+    format is present on disk.
+    """
+    if not os.path.exists(path):
+        stem, _ = os.path.splitext(path)
+        for ext in (".slaf", ".h5ad"):
+            candidate = stem + ext
+            if os.path.exists(candidate):
+                return _read_slice(candidate, backed=backed)
+        raise FileNotFoundError(
+            f"No slice file found at {path!r} (tried .slaf and .h5ad)"
+        )
+
+    if path.endswith(".slaf"):
+        from slaf.integrations.anndata import read_slaf
+        import anndata as _ad
+        lazy = read_slaf(path)
+        if backed:
+            return lazy
+        X = lazy.X.compute()
+        return _ad.AnnData(X=X, obs=lazy.obs.copy(), var=lazy.var.copy())
+
+    return sc.read_h5ad(path, backed="r" if backed else None)
+
+
+def _is_slice_file(fname: str) -> bool:
+    return fname.endswith((".h5ad", ".slaf"))
+
+
+def _unique_slice_files(names):
+    """Deduplicate slice filenames by stem, preferring .slaf over .h5ad."""
+    by_stem = {}
+    for name in names:
+        stem, ext = os.path.splitext(name)
+        if stem not in by_stem or ext == ".slaf":
+            by_stem[stem] = name
+    return sorted(by_stem.values())
+
+
 def _set_uniform_sampling_prob(adata, col="sampling_prob"):
     """Set uniform per-cell sampling probabilities (dataloader will renormalize)."""
     adata.obs[col] = np.full(adata.n_obs, 1.0, dtype=np.float64)
@@ -147,26 +190,26 @@ class SliceDataLoader:
         ]
         if fast:
             slices1 = [
-                sc.read_h5ad(os.path.join(input_dir, fname))
+                _read_slice(os.path.join(input_dir, fname))
                 for i, fname in enumerate(sorted_slices1)
                 if i in [26, 27, 28, 29]
             ]
         elif fast_select:
             slices1 = [
-                sc.read_h5ad(os.path.join(input_dir, fname))
+                _read_slice(os.path.join(input_dir, fname))
                 for i, fname in enumerate(sorted_slices1)
                 if i in [fast_select - 1, fast_select, fast_select + 1]
             ]
         elif select_indices is not None:
             idx_set = set(select_indices)
             slices1 = [
-                sc.read_h5ad(os.path.join(input_dir, fname))
+                _read_slice(os.path.join(input_dir, fname))
                 for i, fname in enumerate(sorted_slices1)
                 if i in idx_set
             ]
         else:
             slices1 = [
-                sc.read_h5ad(os.path.join(input_dir, fname)) for fname in sorted_slices1
+                _read_slice(os.path.join(input_dir, fname)) for fname in sorted_slices1
             ]
         for s in slices1:
             s.obs["technology"] = "M550"
@@ -209,11 +252,12 @@ class SliceDataLoader:
         rq1_x_means = {}
         for i in rq1_eligible_indices:
             fname = sorted_slices1[i]
-            s = sc.read_h5ad(os.path.join(input_dir, fname), backed="r")
+            s = _read_slice(os.path.join(input_dir, fname), backed=True)
             rq1_z_means[i] = float(s.obs["z_ccf"].mean())
             rq1_y_means[i] = float(s.obs["y_ccf"].mean())
             rq1_x_means[i] = float(s.obs["x_ccf"].mean())
-            s.file.close()
+            if hasattr(s, "file"):
+                s.file.close()
         print(rq1_z_means)
         print(rq1_y_means)
         print(rq1_x_means)
@@ -246,12 +290,12 @@ class SliceDataLoader:
             )
         input_dir = os.path.join(zhuang_base, f"Zhuang-ABCA-{n}")
         if remove_edges:
-            sorted_slices2 = sorted(
-                [f for f in os.listdir(input_dir) if f.endswith(".h5ad")]
+            sorted_slices2 = _unique_slice_files(
+                [f for f in os.listdir(input_dir) if _is_slice_file(f)]
             )[2:-2]
         else:
-            sorted_slices2 = sorted(
-                [f for f in os.listdir(input_dir) if f.endswith(".h5ad")]
+            sorted_slices2 = _unique_slice_files(
+                [f for f in os.listdir(input_dir) if _is_slice_file(f)]
             )
         print(sorted_slices2)
         if fast_select:
@@ -265,7 +309,7 @@ class SliceDataLoader:
             sorted_slices2 = [f for i, f in enumerate(sorted_slices2)]
         print(sorted_slices2)
         slices2 = [
-            sc.read_h5ad(os.path.join(input_dir, fname))
+            _read_slice(os.path.join(input_dir, fname))
             for fname in tqdm.tqdm(sorted_slices2)
         ]
 
@@ -302,7 +346,7 @@ class SliceDataLoader:
             "Trem2_5xFAD5_cleaned.h5ad",
         ]
         return [
-            sc.read_h5ad(os.path.join(input_dir, fname)) for fname in sorted_slices1
+            _read_slice(os.path.join(input_dir, fname)) for fname in sorted_slices1
         ]
 
 
@@ -416,16 +460,20 @@ class SliceDataLoader:
 
         if adata2_path is not None:
             if output_dir is not None:
-                train_path = os.path.join(output_dir, "train.h5ad")
-                if os.path.exists(train_path):
+                train_stem = os.path.join(output_dir, "train")
+                train_path = next(
+                    (train_stem + ext for ext in (".slaf", ".h5ad") if os.path.exists(train_stem + ext)),
+                    None,
+                )
+                if train_path is not None:
                     print(f"Found existing {train_path}, loading instead of rebuilding...")
-                    self.adata_train = sc.read_h5ad(train_path)
+                    self.adata_train = _read_slice(train_path)
                     self.adata_val = adata_val
                     self.adata_test = adata_test
                     return
 
             rng = np.random.default_rng(seed=seed)
-            adata2 = sc.read_h5ad(adata2_path)
+            adata2 = _read_slice(adata2_path)
             adata2.var_names_make_unique()
             if gene_set is not None:
                 adata2._inplace_subset_var(gene_set)
@@ -487,7 +535,8 @@ class SliceDataLoader:
             print(adata_train)
 
             if output_dir is not None and rank == 0:
-                adata_train.write(os.path.join(output_dir, "train.h5ad"))
+                from slaf.data.converter import SLAFConverter
+                SLAFConverter(chunked=False).convert_anndata(adata_train, os.path.join(output_dir, "train.slaf"))
 
         self.adata_train = adata_train
         self.adata_val = adata_val

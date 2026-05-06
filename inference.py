@@ -455,6 +455,37 @@ class Inference:
                 cheat_with_expr=None,
                 fast=True,
             )
+
+            if self.config.get("expression_verbose_eval", False):
+                print("\n================ DEBUG: Inference Cell 0 ================")
+                cell_obs = adata_sub.obs.iloc[0]
+                for col in ["subclass", "supertype", "cluster", "<x>", "<y>", "<z>", "technology", "disease_state"]:
+                    if col in cell_obs.index:
+                        print(f"  {col}: {cell_obs[col]}")
+
+                r0, gene_tokens_0, new_vals_0, gen_seq_0, _, _ = results[0]
+
+                print(f"\nGenerated {len(gene_tokens_0)} tokens (first 20):")
+                print(gene_tokens_0[:20])
+                print("Expression vals (first 20):")
+                print(new_vals_0[:20])
+
+                gt_vec = real_data.X[0]
+                if hasattr(gt_vec, "toarray"):
+                    gt_vec = gt_vec.toarray().ravel()
+                else:
+                    gt_vec = np.asarray(gt_vec).ravel()
+                gt_genes = list(real_data.var_names)
+                gt_expressed = {g: v for g, v in zip(gt_genes, gt_vec) if v > 0}
+
+                print(f"\nGT expressed genes: {len(gt_expressed)}  |  Pred expressed genes: {len(set(gene_tokens_0))}")
+                print("\nTop GT expressed genes vs pred:")
+                for gene, gt_val in sorted(gt_expressed.items(), key=lambda x: -x[1])[:30]:
+                    flag = "✅" if gene in gene_tokens_0 else "❌"
+                    pred_val = new_vals_0[gene_tokens_0.index(gene)] if gene in gene_tokens_0 else 0.0
+                    print(f"  {flag} {gene:20s} | GT={gt_val:.3f} | Pred={pred_val:.3f}")
+                print("===========================================================\n")
+
             rows = [r[0] for r in results]
 
             rows = np.array(rows)

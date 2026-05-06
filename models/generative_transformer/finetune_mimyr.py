@@ -21,6 +21,7 @@ import torch.distributed as dist
 import scipy.sparse as sp
 import pandas as pd
 from anndata import AnnData
+from concurrent.futures import ThreadPoolExecutor
 
 
 from .model.model import MimyrConfig, MimyrModel
@@ -378,6 +379,100 @@ def evaluate_expression_metrics(
     return pearson_rs, f1s, precisions, recalls
 
 
+# ---------------------------------------------------------------------------
+# Fast vectorized evaluation helpers
+# ---------------------------------------------------------------------------
+
+def _build_token_to_var_idx(tokenizer, var_names):
+    """Build (vocab_size,) int32 array mapping token_id → var_names index (-1 if not a gene)."""
+    var_to_idx = {g: i for i, g in enumerate(var_names)}
+    vocab_size = len(tokenizer)
+    mapping = np.full(vocab_size, -1, dtype=np.int32)
+    all_tokens = tokenizer.convert_ids_to_tokens(list(range(vocab_size)))
+    for tid, tok in enumerate(all_tokens):
+        if tok is not None and tok in var_to_idx:
+            mapping[tid] = var_to_idx[tok]
+    return mapping
+
+
+def _build_valid_gene_mask(adata, var_names):
+    """Boolean mask over var_names for genes with nonzero expression in adata."""
+    gene_sums = np.asarray(adata.X.sum(axis=0)).ravel()
+    if list(adata.var_names) == list(var_names):
+        return gene_sums > 0
+    name_to_idx = {g: i for i, g in enumerate(adata.var_names)}
+    return np.array(
+        [(gene_sums[name_to_idx[g]] > 0) if g in name_to_idx else False for g in var_names],
+        dtype=bool,
+    )
+
+
+def _evaluate_metrics_vectorized(
+    adata_X,
+    idxs,
+    logits_labels,       # (B, T, V) CPU tensor
+    logits_exp_real,     # (B, T, 1) CPU tensor
+    labels,              # (B, T) numpy int array; -100 marks prompt/pad
+    token_to_var_idx,    # (vocab_size,) int32; -1 = not a gene
+    valid_gene_mask,     # (n_genes,) bool
+    n_genes,
+    mask_token_id=-100,
+    threshold=0.0,
+):
+    """Fully-vectorized batch evaluation: Pearson r, F1, precision, recall."""
+    B = logits_labels.shape[0]
+    token_preds = logits_labels.argmax(dim=-1).numpy()         # (B, T) int64
+    expr_vals   = logits_exp_real.squeeze(-1).float().numpy()  # (B, T) float32
+
+    # Build predicted expression matrix via scatter — no Python per-cell loop
+    valid_pos = labels != mask_token_id                  # (B, T)
+    b_idxs, t_idxs = np.where(valid_pos)
+    tids      = token_preds[b_idxs, t_idxs]
+    vals      = expr_vals[b_idxs, t_idxs]
+    gene_idxs = token_to_var_idx[tids]
+
+    keep = gene_idxs >= 0
+    b_k  = b_idxs[keep]
+    g_k  = gene_idxs[keep]
+    v_k  = vals[keep]
+
+    pred_expr = np.zeros((B, n_genes), dtype=np.float32)
+    count_mat = np.zeros((B, n_genes), dtype=np.int32)
+    flat_idx  = b_k * n_genes + g_k
+    np.add.at(pred_expr.ravel(), flat_idx, v_k)
+    np.add.at(count_mat.ravel(), flat_idx, 1)
+    nz = count_mat > 0
+    pred_expr[nz] /= count_mat[nz]
+
+    # Ground-truth: single batch fetch instead of per-cell access
+    idxs_list = idxs.tolist() if hasattr(idxs, "tolist") else list(idxs)
+    if sp.issparse(adata_X):
+        gt_expr = np.asarray(adata_X[idxs_list].todense(), dtype=np.float32)
+    else:
+        gt_expr = np.asarray(adata_X[idxs_list], dtype=np.float32)
+
+    p = pred_expr[:, valid_gene_mask]  # (B, G)
+    g = gt_expr[:,  valid_gene_mask]   # (B, G)
+
+    # Vectorized Pearson correlation
+    p_c   = p - p.mean(axis=1, keepdims=True)
+    g_c   = g - g.mean(axis=1, keepdims=True)
+    denom = np.sqrt((p_c ** 2).sum(axis=1)) * np.sqrt((g_c ** 2).sum(axis=1))
+    pearson_rs = np.where(denom > 0, (p_c * g_c).sum(axis=1) / denom, 0.0)
+
+    # Vectorized F1 / precision / recall
+    pred_pos = p > threshold
+    gt_pos   = g > threshold
+    tp = (pred_pos & gt_pos).sum(axis=1).astype(np.float32)
+    pp = pred_pos.sum(axis=1).astype(np.float32)
+    gp = gt_pos.sum(axis=1).astype(np.float32)
+    prec = np.where(pp > 0, tp / pp, 0.0)
+    rec  = np.where(gp > 0, tp / gp, 0.0)
+    f1   = np.where((prec + rec) > 0, 2 * prec * rec / (prec + rec), 0.0)
+
+    return pearson_rs.tolist(), f1.tolist(), prec.tolist(), rec.tolist()
+
+
 def _remap_x_to_test_distribution(adata_train: AnnData, adata_test: AnnData, seed: int = 42) -> None:
     """
     Slice-aware stochastic remap of training <x> bins to test <x> bins.
@@ -670,6 +765,11 @@ def get_parser():
             "single-threaded before the multi-GPU training job to avoid OOM during data prep."
         ),
     )
+    parser.add_argument(
+        "--no-amp",
+        action="store_true",
+        help="Disable automatic mixed precision (AMP). By default AMP is enabled on CUDA.",
+    )
 
     return parser
 
@@ -941,6 +1041,9 @@ def train(args):
             model, device_ids=[local_rank]
         )
 
+    use_amp = not getattr(args, "no_amp", False) and device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
+
     # 6) Initialize W&B
     if rank == 0:
         wandb.init(
@@ -963,6 +1066,25 @@ def train(args):
         start_epoch = int(m.group(1)) + 1 if m else 1
     else:
         start_epoch = 1
+
+    # Pre-compute evaluation helpers once (token→gene index map + valid-gene masks)
+    var_names_train = adata_train.var_names.tolist()
+    token_to_var_idx = _build_token_to_var_idx(tokenizer, var_names_train)
+    valid_gene_mask_train = _build_valid_gene_mask(adata_train, var_names_train)
+    n_genes_train = len(var_names_train)
+    if adata_val is not None:
+        valid_gene_mask_val = _build_valid_gene_mask(adata_val, adata_val.var_names.tolist())
+        token_to_var_idx_val = _build_token_to_var_idx(tokenizer, adata_val.var_names.tolist())
+        n_genes_val = adata_val.n_vars
+    if adata_test is not None:
+        valid_gene_mask_test = _build_valid_gene_mask(adata_test, adata_test.var_names.tolist())
+        token_to_var_idx_test = _build_token_to_var_idx(tokenizer, adata_test.var_names.tolist())
+        n_genes_test = adata_test.n_vars
+
+    # Background thread for rank-0 metric computation so the main thread (and GPU)
+    # is never blocked waiting for CPU eval work during DDP training.
+    _metric_executor = ThreadPoolExecutor(max_workers=1)
+    _metric_futures = []
 
     # 7) Training + validation loop
     for epoch in range(start_epoch, args.epochs + 1):
@@ -998,77 +1120,130 @@ def train(args):
             if labels is not None:
                 labels = labels.to(device)
 
-            optimizer.zero_grad()
-            (
-                logits_cls,
-                logits_exp_bins,
-                logits_exp_real,
-                loss,
-                loss_cls,
-                loss_exp_bin,
-                loss_exp_real,
-            ) = model(
-                idx=input_ids,
-                x_expr=x_expr,
-                targets=labels,
-                y_expr=expr_target,
-                lambda_val=args.lambda_val,
-                return_hidden=False,
-            )
-            loss.backward()
-            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                (
+                    logits_cls,
+                    logits_exp_bins,
+                    logits_exp_real,
+                    loss,
+                    loss_cls,
+                    loss_exp_bin,
+                    loss_exp_real,
+                ) = model(
+                    idx=input_ids,
+                    x_expr=x_expr,
+                    targets=labels,
+                    y_expr=expr_target,
+                    lambda_val=args.lambda_val,
+                    return_hidden=False,
+                )
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
-            total_loss += loss.item() if loss is not None else 0.0
-            total_cls += loss_cls.item() if loss_cls is not None else 0.0
-            total_exp_bin += loss_exp_bin.item() if loss_exp_bin is not None else 0.0
-            total_exp_real += loss_exp_real.item() if loss_exp_real is not None else 0.0
+            # Single GPU→CPU sync for loss scalars (reused below to avoid a second sync)
+            _loss_val     = loss.item()     if loss     is not None else 0.0
+            _cls_val      = loss_cls.item() if loss_cls is not None else 0.0
+            _exp_bin_val  = loss_exp_bin.item() if loss_exp_bin  is not None else 0.0
+            _exp_real_val = loss_exp_real.item() if loss_exp_real is not None else 0.0
 
-            if rank == 0:
-                if step % args.log_per_steps == 0:
+            total_loss     += _loss_val
+            total_cls      += _cls_val
+            total_exp_bin  += _exp_bin_val
+            total_exp_real += _exp_real_val
+
+            if rank == 0 and step % args.log_per_steps == 0:
+                do_verbose = getattr(args, "verbose_eval", False) and not verbose_done_this_epoch
+                if do_verbose:
+                    # Synchronous verbose path (rare — only once per epoch)
                     with torch.no_grad():
-                        do_verbose = getattr(args, "verbose_eval", False) and not verbose_done_this_epoch
-                        pearson_rs_train, f1s, precs, recs = (
-                            evaluate_expression_metrics(
-                                adata=adata_train,
-                                batch=batch,
-                                logits_labels=logits_cls.detach().cpu(),
-                                logits_exp_real=logits_exp_real.detach().cpu(),
-                                tokenizer=tokenizer,
-                                tokens_and_vals_to_expression_row_fn=tokens_and_vals_to_expression_row,
-                                var_names=adata_train.var_names.tolist(),
-                                labels=labels,  # tensor on device is fine; fn handles .detach().cpu()
-                                mask_token_id=-100,
-                                verbose=do_verbose,
-                            )
+                        pearson_rs_train, f1s, precs, recs = evaluate_expression_metrics(
+                            adata=adata_train,
+                            batch=batch,
+                            logits_labels=logits_cls.detach().cpu(),
+                            logits_exp_real=logits_exp_real.detach().cpu(),
+                            tokenizer=tokenizer,
+                            tokens_and_vals_to_expression_row_fn=tokens_and_vals_to_expression_row,
+                            var_names=adata_train.var_names.tolist(),
+                            labels=labels,
+                            mask_token_id=-100,
+                            verbose=True,
                         )
-                        if do_verbose:
-                            verbose_done_this_epoch = True
-                        mean_train_pearson_r = (
-                            float(np.mean(pearson_rs_train))
-                            if len(pearson_rs_train)
-                            else 0.0
-                        )
-                        all_train_pearson_rs.extend(pearson_rs_train)
-                        mean_f1 = float(np.mean(f1s)) if f1s else 0.0
-                        mean_prc = float(np.mean(precs)) if precs else 0.0
-                        mean_rec = float(np.mean(recs)) if recs else 0.0
-                        all_train_f1.extend(f1s)
-                        all_train_prec.extend(precs)
-                        all_train_rec.extend(recs)
+                    verbose_done_this_epoch = True
+                    mean_r   = float(np.mean(pearson_rs_train)) if pearson_rs_train else 0.0
+                    mean_f1  = float(np.mean(f1s))   if f1s   else 0.0
+                    mean_prc = float(np.mean(precs)) if precs else 0.0
+                    mean_rec = float(np.mean(recs))  if recs  else 0.0
+                    all_train_pearson_rs.extend(pearson_rs_train)
+                    all_train_f1.extend(f1s)
+                    all_train_prec.extend(precs)
+                    all_train_rec.extend(recs)
+                    wandb.log({
+                        "train/batch_loss":          _loss_val,
+                        "train/batch_loss_cls":      _cls_val,
+                        "train/batch_loss_exp_bin":  _exp_bin_val,
+                        "train/batch_loss_exp_real": _exp_real_val,
+                        "train/pearson_r": mean_r,
+                        "train/f1":        mean_f1,
+                        "train/precision": mean_prc,
+                        "train/recall":    mean_rec,
+                        "train/step": (epoch - 1) * len(train_loader) + step,
+                    })
+                else:
+                    # Async path: snapshot CPU tensors and hand off to background thread.
+                    # Main thread (and GPU) proceed immediately — no blocking on eval.
+                    _snap_logits = logits_cls.detach().cpu()
+                    _snap_expr   = logits_exp_real.detach().cpu()
+                    _snap_lnp    = labels.detach().cpu().numpy() if hasattr(labels, "detach") else np.asarray(labels)
+                    _snap_idx    = batch.get("idx", range(logits_cls.shape[0]))
+                    if hasattr(_snap_idx, "cpu"):
+                        _snap_idx = _snap_idx.cpu()
+                    _snap_loss  = (_loss_val, _cls_val, _exp_bin_val, _exp_real_val)
+                    _snap_step  = (epoch - 1) * len(train_loader) + step
 
-                    wandb.log(
-                        {
-                            "train/batch_loss": loss.item(),
-                            "train/batch_loss_cls": loss_cls.item(),
-                            "train/batch_loss_exp_bin": loss_exp_bin.item(),
-                            "train/batch_loss_exp_real": loss_exp_real.item(),
-                            "train/pearson_r": mean_train_pearson_r,
-                            "train/f1": mean_f1,
-                            "train/precision": mean_prc,
-                            "train/recall": mean_rec,
-                            "train/step": (epoch - 1) * len(train_loader) + step,
-                        }
-                    )
+                    def _metric_task(sl, se, lnp, idx, loss_snap, log_step):
+                        rs, f1s, precs, recs = _evaluate_metrics_vectorized(
+                            adata_X=adata_train.X,
+                            idxs=idx,
+                            logits_labels=sl,
+                            logits_exp_real=se,
+                            labels=lnp,
+                            token_to_var_idx=token_to_var_idx,
+                            valid_gene_mask=valid_gene_mask_train,
+                            n_genes=n_genes_train,
+                        )
+                        wandb.log({
+                            "train/batch_loss":          loss_snap[0],
+                            "train/batch_loss_cls":      loss_snap[1],
+                            "train/batch_loss_exp_bin":  loss_snap[2],
+                            "train/batch_loss_exp_real": loss_snap[3],
+                            "train/pearson_r": float(np.mean(rs))    if rs    else 0.0,
+                            "train/f1":        float(np.mean(f1s))   if f1s   else 0.0,
+                            "train/precision": float(np.mean(precs)) if precs else 0.0,
+                            "train/recall":    float(np.mean(recs))  if recs  else 0.0,
+                            "train/step": log_step,
+                        })
+                        return rs, f1s, precs, recs
+
+                    _metric_futures.append(_metric_executor.submit(
+                        _metric_task,
+                        _snap_logits, _snap_expr, _snap_lnp, _snap_idx, _snap_loss, _snap_step,
+                    ))
+
+        # Drain background metric futures before computing epoch-level stats.
+        # By now most will already be done; this is just a final sync point.
+        if rank == 0:
+            for fut in _metric_futures:
+                try:
+                    rs, f1s, precs, recs = fut.result()
+                    all_train_pearson_rs.extend(rs)
+                    all_train_f1.extend(f1s)
+                    all_train_prec.extend(precs)
+                    all_train_rec.extend(recs)
+                except Exception as e:
+                    print(f"Warning: background metric task failed: {e}")
+            _metric_futures.clear()
 
         avg_loss = total_loss / len(train_loader)
         avg_cls = total_cls / len(train_loader)
@@ -1107,7 +1282,6 @@ def train(args):
             )
 
         if val_loader is not None:
-            torch.cuda.empty_cache()
             model.eval()
             v_loss, v_cls, v_exp_bin, v_exp_real, count = 0.0, 0.0, 0.0, 0.0, 0
             all_pearson_rs = []
@@ -1123,29 +1297,30 @@ def train(args):
                     if labels is not None:
                         labels = labels.to(device)
 
-                    logits_labels, _, logits_exp_real, l, lc, leb, ler = model(
-                        idx=input_ids,
-                        x_expr=x_expr,
-                        targets=labels,
-                        y_expr=expr_target,
-                        lambda_val=args.lambda_val,
-                        return_hidden=False,
-                    )
+                    with torch.cuda.amp.autocast(enabled=use_amp):
+                        logits_labels, _, logits_exp_real, l, lc, leb, ler = model(
+                            idx=input_ids,
+                            x_expr=x_expr,
+                            targets=labels,
+                            y_expr=expr_target,
+                            lambda_val=args.lambda_val,
+                            return_hidden=False,
+                        )
                     v_loss += l.item()
                     v_cls += lc.item()
                     v_exp_bin += leb.item()
                     v_exp_real += ler.item()
                     count += 1
-                    pearson_rs, f1s, precs, recs = evaluate_expression_metrics(
-                        adata=adata_val,
-                        batch=batch,
+                    _lnp_val = labels.detach().cpu().numpy() if hasattr(labels, "detach") else np.asarray(labels)
+                    pearson_rs, f1s, precs, recs = _evaluate_metrics_vectorized(
+                        adata_X=adata_val.X,
+                        idxs=batch.get("idx", range(logits_labels.shape[0])),
                         logits_labels=logits_labels.cpu(),
                         logits_exp_real=logits_exp_real.cpu(),
-                        tokenizer=tokenizer,
-                        tokens_and_vals_to_expression_row_fn=tokens_and_vals_to_expression_row,
-                        var_names=adata_val.var_names.tolist(),
-                        labels=labels,
-                        mask_token_id=-100,
+                        labels=_lnp_val,
+                        token_to_var_idx=token_to_var_idx_val,
+                        valid_gene_mask=valid_gene_mask_val,
+                        n_genes=n_genes_val,
                     )
                     all_pearson_rs.extend(pearson_rs)
                     all_val_f1.extend(f1s)
@@ -1182,7 +1357,6 @@ def train(args):
                 )
 
         if test_loader is not None:
-            torch.cuda.empty_cache()
             model.eval()
             t_loss, t_cls, t_exp_bin, t_exp_real, t_count = 0.0, 0.0, 0.0, 0.0, 0
             all_test_pearson_rs = []
@@ -1199,29 +1373,30 @@ def train(args):
                     if labels is not None:
                         labels = labels.to(device)
 
-                    logits_labels, _, logits_exp_real, l, lc, leb, ler = model(
-                        idx=input_ids,
-                        x_expr=x_expr,
-                        targets=labels,
-                        y_expr=expr_target,
-                        lambda_val=args.lambda_val,
-                        return_hidden=False,
-                    )
+                    with torch.cuda.amp.autocast(enabled=use_amp):
+                        logits_labels, _, logits_exp_real, l, lc, leb, ler = model(
+                            idx=input_ids,
+                            x_expr=x_expr,
+                            targets=labels,
+                            y_expr=expr_target,
+                            lambda_val=args.lambda_val,
+                            return_hidden=False,
+                        )
                     t_loss += l.item()
                     t_cls += lc.item()
                     t_exp_bin += leb.item()
                     t_exp_real += ler.item()
                     t_count += 1
-                    pearson_rs, f1s, precs, recs = evaluate_expression_metrics(
-                        adata=adata_test,
-                        batch=batch,
+                    _lnp_test = labels.detach().cpu().numpy() if hasattr(labels, "detach") else np.asarray(labels)
+                    pearson_rs, f1s, precs, recs = _evaluate_metrics_vectorized(
+                        adata_X=adata_test.X,
+                        idxs=batch.get("idx", range(logits_labels.shape[0])),
                         logits_labels=logits_labels.cpu(),
                         logits_exp_real=logits_exp_real.cpu(),
-                        tokenizer=tokenizer,
-                        tokens_and_vals_to_expression_row_fn=tokens_and_vals_to_expression_row,
-                        var_names=adata_test.var_names.tolist(),
-                        labels=labels,
-                        mask_token_id=-100,
+                        labels=_lnp_test,
+                        token_to_var_idx=token_to_var_idx_test,
+                        valid_gene_mask=valid_gene_mask_test,
+                        n_genes=n_genes_test,
                     )
                     all_test_pearson_rs.extend(pearson_rs)
                     all_test_f1.extend(f1s)
