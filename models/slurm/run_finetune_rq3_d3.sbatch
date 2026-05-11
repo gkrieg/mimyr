@@ -5,7 +5,7 @@
 #SBATCH -c 8
 #SBATCH --mem=150Gb
 #SBATCH --job-name rq3_finetune
-#SBATCH --output rq3_finetune-%J.txt
+#SBATCH --output /work/magroup/skrieger/tissue_generator/spencer_mimyr/models/slurm/logs/rq3_finetune-%J.txt
 #SBATCH -t 2-00:00:00
 
 module load cuda-12.1
@@ -21,4 +21,4 @@ while lsof -i TCP:$port &>/dev/null; do
   port=$((port + 1))
 done
 
-torchrun --nproc_per_node=2 --master_port $port main.py --config configs/finetune_rq3.yaml
+torchrun --nproc_per_node=2 --master_port $port main.py --config configs/finetune_rq3_d3.yaml

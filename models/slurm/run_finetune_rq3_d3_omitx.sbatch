@@ -1,11 +1,11 @@
 #!/bin/bash
 #SBATCH -p gpu-large
-###SBATCH -w oven-0-27
-#SBATCH --gres gpu:3
-#SBATCH -c 12
-#SBATCH --mem=450Gb
-#SBATCH --job-name TG_base
-#SBATCH --output TG_base-%J.txt
+###SBATCH -w oven-0-13
+#SBATCH --gres gpu:2
+#SBATCH -c 8
+#SBATCH --mem=100Gb
+#SBATCH --job-name rq3_finetune
+#SBATCH --output /work/magroup/skrieger/tissue_generator/spencer_mimyr/models/slurm/logs/rq3_finetune-%J.txt
 #SBATCH -t 2-00:00:00
 
 module load cuda-12.1
@@ -21,4 +21,4 @@ while lsof -i TCP:$port &>/dev/null; do
   port=$((port + 1))
 done
 
-torchrun --nproc_per_node=3 --master_port $port main.py --config configs/train_base.yaml
+torchrun --nproc_per_node=2 --master_port $port main.py --config configs/finetune_rq3_d3_omit_x.yaml

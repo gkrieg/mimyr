@@ -3,9 +3,9 @@
 ###SBATCH -w oven-0-13
 #SBATCH --gres gpu:2
 #SBATCH -c 8
-#SBATCH --mem=200Gb
-#SBATCH --job-name rq4_finetune
-#SBATCH --output rq4_finetune-%J.txt
+#SBATCH --mem=150Gb
+#SBATCH --job-name rq3_v2_test
+#SBATCH --output /work/magroup/skrieger/tissue_generator/spencer_mimyr/models/slurm/logs/rq3_v2_test-%J.txt
 #SBATCH -t 2-00:00:00
 
 module load cuda-12.1
@@ -16,9 +16,9 @@ mkdir -p /scratch/skrieger
 export WANDB_DIR=/scratch/skrieger
 export WANDB_API_KEY=$(cat ~/.wandb_api_key)
 
-port=25902
+port=25903
 while lsof -i TCP:$port &>/dev/null; do
   port=$((port + 1))
 done
 
-torchrun --nproc_per_node=2 --master_port $port main.py --config configs/finetune_rq4.yaml
+torchrun --nproc_per_node=2 --master_port $port main.py --config configs/base_rq3_d1_continuous_coords.yaml
