@@ -14,9 +14,11 @@ device: cuda
 skip_combined_fit: true
 
 # --- Model ---
-expression_model_size: medium
+# expression_model_size: medium
 expression_output_dir: /compute/oven-0-13/skrieger/TG-base-zhuang1-slaf
 expression_rebalance_only: true
+expression_from_finetuned: true
+expression_model_checkpoint: /compute/oven-0-13/skrieger/TG-base-zhuang1-slaf/epoch312_model.pt
 
 # --- scRNA-seq reference ---
 expression_adata2: /work/magroup/skrieger/tissue_generator/MERFISH_aging/sc_ref_xyz_mousegenes_raw.h5ad
@@ -32,6 +34,6 @@ expression_new_expression_size: 100
 expression_save_frequency: 1
 expression_xyz_noise: true
 expression_epoch_samples: 1000000
-expression_log_per_steps: 10
+expression_log_per_steps: 1000
 
 #expression_verbose_eval: true

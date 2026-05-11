@@ -24,10 +24,13 @@ expression_from_finetuned: true
 # --- Training hyperparameters ---
 expression_batch_size: 128
 expression_max_len: 500
-expression_no_shuffle: true
+expression_no_shuffle: false
 expression_epochs: 1000
 expression_lr: 0.0005
 expression_lambda_val: 0.1
 expression_new_expression_size: 100
-expression_save_frequency: 2
+expression_save_frequency: 1
 expression_xyz_noise: true
+
+# --- Test evaluation ---
+expression_eval_test: true
