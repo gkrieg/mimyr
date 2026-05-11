@@ -324,6 +324,8 @@ class SliceDataLoader:
             slice.obs["y_ccf"] = df_filtered["y"]
             slice.obs["z_ccf"] = df_filtered["z"]
             slice.obs["technology"] = "M1100"
+            slice.obs['disease_state'] = 'healthy'
+            slice.obs['species'] = 'mouse'
             valid_mask = ~slice.obs[["x_ccf", "y_ccf", "z_ccf"]].isna().any(axis=1)
             slices2[i] = slice[valid_mask].copy()
 
