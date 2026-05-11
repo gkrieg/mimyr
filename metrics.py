@@ -1,35 +1,12 @@
+import math
 import random
 import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-from scipy.spatial import cKDTree
-import tqdm
-from scipy.spatial import Delaunay
-import numpy as np
-import numpy as np
-from scipy.spatial import cKDTree
-from tqdm import tqdm
-
-
-import numpy as np
-from scipy.spatial import cKDTree
-from tqdm import tqdm
 import pandas as pd
-
-from scipy.spatial import Delaunay
-import numpy as np
-
-import numpy as np
 from collections import Counter
-from scipy.spatial import Delaunay
-
-import numpy as np
-from scipy.spatial import cKDTree
-from tqdm import tqdm
-import numpy as np
-from scipy.spatial import cKDTree
+from sklearn.metrics.pairwise import cosine_similarity
+from scipy.spatial import cKDTree, Delaunay
 from scipy.stats import pearsonr, spearmanr
-import numpy as np
-from scipy.spatial import cKDTree
+from tqdm import tqdm
 
 
 
@@ -59,70 +36,63 @@ def soft_accuracy(
     gt_tree = cKDTree(gt_positions)
     pred_tree = cKDTree(pred_positions)
 
-    result = []
-    gt_distributions = []
-    pred_distributions = []
-    gt_neighbors_all = []
-    pred_neighbors_all = []
-
     if sample is not None:
         percent = sample
         n = int(len(gt_positions) * percent / 100)
         indices = np.random.choice(len(gt_positions), size=n, replace=False)
         samples = gt_positions[indices]
-
     else:
         samples = gt_positions
 
-    print("samples",samples)
+    # Pre-compute encoding matrices for fast indexing
+    gt_encoding_matrix = np.stack([encoding_dict[ct] for ct in gt_celltypes])    # (N_gt, C)
+    pred_encoding_matrix = np.stack([encoding_dict[ct] for ct in pred_celltypes]) # (N_pred, C)
 
-    for i, pos in tqdm(list(enumerate(samples))):
-        if k > 0:
-            gt_distances, gt_indices = gt_tree.query(pos, k=k + 1)
-            pred_distances, pred_indices = pred_tree.query(pos, k=k + 1)
-            gt_neighbors = gt_indices[1:]
-            pred_neighbors = pred_indices[1:]
-        else:
-            gt_neighbors = gt_tree.query_ball_point(pos, radius)
-            pred_neighbors = pred_tree.query_ball_point(pos, radius)
-        gt_neighbors_all.append(gt_neighbors)
-        pred_neighbors_all.append(pred_neighbors)
+    if k > 0:
+        # Fully vectorized kNN path: batch query all sample points at once
+        _, gt_all_idx = gt_tree.query(samples, k=k + 1, workers=-1)   # (M, k+1)
+        _, pred_all_idx = pred_tree.query(samples, k=k + 1, workers=-1)
+        gt_sums = gt_encoding_matrix[gt_all_idx[:, 1:]].sum(axis=1)   # (M, C)
+        pred_sums = pred_encoding_matrix[pred_all_idx[:, 1:]].sum(axis=1)
 
-        gt_encoding_sum = np.sum(
-            [encoding_dict[gt_celltypes[j]] for j in gt_neighbors], axis=0
-        )
-        pred_encoding_sum = np.sum(
-            [encoding_dict[pred_celltypes[j]] for j in pred_neighbors], axis=0
-        )
+        gt_norms = np.linalg.norm(gt_sums, axis=1, keepdims=True)
+        pred_norms = np.linalg.norm(pred_sums, axis=1, keepdims=True)
+        gt_distributions = np.divide(gt_sums, gt_norms, out=np.zeros_like(gt_sums), where=gt_norms != 0)
+        pred_distributions = np.divide(pred_sums, pred_norms, out=np.zeros_like(pred_sums), where=pred_norms != 0)
+        result = (gt_distributions * pred_distributions).sum(axis=1).tolist()
+    else:
+        # Radius path: batch query with workers=-1, then loop with fast numpy ops
+        gt_neighbors_all = gt_tree.query_ball_point(samples, radius, workers=-1)
+        pred_neighbors_all = pred_tree.query_ball_point(samples, radius, workers=-1)
 
-        # Normalize
-        gt_norm = np.linalg.norm(gt_encoding_sum)
-        pred_norm = np.linalg.norm(pred_encoding_sum)
+        gt_distributions = []
+        pred_distributions = []
+        result = []
+        for i, (gt_neighbors, pred_neighbors) in enumerate(zip(gt_neighbors_all, pred_neighbors_all)):
+            gt_encoding_sum = gt_encoding_matrix[gt_neighbors].sum(axis=0) if len(gt_neighbors) > 0 else np.zeros(num_classes)
+            pred_encoding_sum = pred_encoding_matrix[pred_neighbors].sum(axis=0) if len(pred_neighbors) > 0 else np.zeros(num_classes)
 
-        gt_distribution = (
-            gt_encoding_sum / gt_norm if gt_norm != 0 else np.zeros(num_classes)
-        )
-        pred_distribution = (
-            pred_encoding_sum / pred_norm if pred_norm != 0 else np.zeros(num_classes)
-        )
-        gt_distributions.append(gt_distribution)
-        pred_distributions.append(pred_distribution)
+            gt_norm = np.linalg.norm(gt_encoding_sum)
+            pred_norm = np.linalg.norm(pred_encoding_sum)
 
-        similarity = cosine_similarity(
-            gt_distribution.reshape(1, -1), pred_distribution.reshape(1, -1)
-        )[0, 0]
-        result.append(similarity)
+            gt_distribution = gt_encoding_sum / gt_norm if gt_norm != 0 else np.zeros(num_classes)
+            pred_distribution = pred_encoding_sum / pred_norm if pred_norm != 0 else np.zeros(num_classes)
+            gt_distributions.append(gt_distribution)
+            pred_distributions.append(pred_distribution)
 
-        if i % 10000 == 0:
-            print(np.mean(result))
+            similarity = float(np.dot(gt_distribution, pred_distribution))
+            result.append(similarity)
+
+            if i % 10000 == 0:
+                print(np.mean(result))
+
+        gt_distributions = np.array(gt_distributions) if gt_distributions else np.zeros((0, num_classes))
 
     if return_percent:
         counts = np.sum([encoding_dict[ct] for ct in gt_celltypes], axis=0) / np.sum(
             [encoding_dict[ct] for ct in gt_celltypes]
         )
-        return [
-            (gt_distribution * counts).sum() for gt_distribution in gt_distributions
-        ]
+        return [(gd * counts).sum() for gd in gt_distributions]
     if return_list:
         return result
 
@@ -213,7 +183,7 @@ def gridized_l1_distance(
     pred_positions = np.array(pred_positions)
 
     d = gt_positions.shape[1]
-    Vd = np.pi ** (d / 2) / np.math.gamma(d / 2 + 1)  # volume of unit d-ball
+    Vd = np.pi ** (d / 2) / math.gamma(d / 2 + 1)  # volume of unit d-ball
     n_gt, n_pred = len(gt_positions), len(pred_positions)
 
     # Build trees
@@ -227,32 +197,23 @@ def gridized_l1_distance(
     mesh = np.meshgrid(*grid_axes, indexing="ij")
     grid_points = np.stack([m.ravel() for m in mesh], axis=-1)
 
-    results = []
+    if k > 0:
+        # kNN mode: batch query all grid points at once
+        gt_d, _ = gt_tree.query(grid_points, k=k, workers=-1)    # (N_grid, k)
+        pred_d, _ = pred_tree.query(grid_points, k=k, workers=-1)
+        r_gt = gt_d[:, -1]
+        r_pred = pred_d[:, -1]
+        p_hat = np.where(r_gt > 0, k / (n_gt * Vd * r_gt**d), 0.0)
+        q_hat = np.where(r_pred > 0, k / (n_pred * Vd * r_pred**d), 0.0)
+    else:
+        # Radius mode: single parallel batch query, return_length avoids list-of-lists
+        k_gt = gt_tree.query_ball_point(grid_points, radius, workers=-1, return_length=True).astype(float)
+        k_pred = pred_tree.query_ball_point(grid_points, radius, workers=-1, return_length=True).astype(float)
+        p_hat = k_gt / (n_gt * Vd * radius**d) if radius > 0 else np.zeros(len(grid_points))
+        q_hat = k_pred / (n_pred * Vd * radius**d) if radius > 0 else np.zeros(len(grid_points))
 
-    for i, pos in tqdm(list(enumerate(grid_points))):
-        if k > 0:
-            # kNN mode
-            gt_distances, _ = gt_tree.query(pos, k=k)
-            pred_distances, _ = pred_tree.query(pos, k=k)
-            r_gt = gt_distances[-1]
-            r_pred = pred_distances[-1]
-
-            p_hat = k / (n_gt * Vd * (r_gt**d)) if r_gt > 0 else 0
-            q_hat = k / (n_pred * Vd * (r_pred**d)) if r_pred > 0 else 0
-        else:
-            # Radius mode
-            gt_neighbors = gt_tree.query_ball_point(pos, radius)
-            pred_neighbors = pred_tree.query_ball_point(pos, radius)
-
-            k_gt = len(gt_neighbors)
-            k_pred = len(pred_neighbors)
-
-            p_hat = k_gt / (n_gt * Vd * (radius**d)) if radius > 0 else 0
-            q_hat = k_pred / (n_pred * Vd * (radius**d)) if radius > 0 else 0
-
-        results.append(abs(p_hat - q_hat))
-
-    return results if return_list else np.mean(results) if results else 0.0
+    results = np.abs(p_hat - q_hat)
+    return results.tolist() if return_list else float(np.mean(results)) if len(results) > 0 else 0.0
 
 
 
@@ -290,7 +251,7 @@ def gridized_kl_divergence(
     pred_positions = np.array(pred_positions)
 
     d = gt_positions.shape[1]
-    Vd = np.pi ** (d / 2) / np.math.gamma(d / 2 + 1)  # volume of unit d-ball
+    Vd = np.pi ** (d / 2) / math.gamma(d / 2 + 1)  # volume of unit d-ball
     n_gt, n_pred = len(gt_positions), len(pred_positions)
 
     # Build trees
@@ -304,36 +265,25 @@ def gridized_kl_divergence(
     mesh = np.meshgrid(*grid_axes, indexing="ij")
     grid_points = np.stack([m.ravel() for m in mesh], axis=-1)
 
-    results = []
+    if k > 0:
+        # kNN mode: batch query all grid points at once
+        gt_d, _ = gt_tree.query(grid_points, k=k, workers=-1)    # (N_grid, k)
+        pred_d, _ = pred_tree.query(grid_points, k=k, workers=-1)
+        r_gt = gt_d[:, -1]
+        r_pred = pred_d[:, -1]
+        p_hat = np.where(r_gt > 0, k / (n_gt * Vd * r_gt**d), 0.0)
+        q_hat = np.where(r_pred > 0, k / (n_pred * Vd * r_pred**d), 0.0)
+    else:
+        # Radius mode: single parallel batch query
+        k_gt = gt_tree.query_ball_point(grid_points, radius, workers=-1, return_length=True).astype(float)
+        k_pred = pred_tree.query_ball_point(grid_points, radius, workers=-1, return_length=True).astype(float)
+        p_hat = k_gt / (n_gt * Vd * radius**d) if radius > 0 else np.zeros(len(grid_points))
+        q_hat = k_pred / (n_pred * Vd * radius**d) if radius > 0 else np.zeros(len(grid_points))
 
-    for i, pos in tqdm(list(enumerate(grid_points))):
-        if k > 0:
-            # kNN mode
-            gt_distances, _ = gt_tree.query(pos, k=k)
-            pred_distances, _ = pred_tree.query(pos, k=k)
-            r_gt = gt_distances[-1]
-            r_pred = pred_distances[-1]
-
-            p_hat = k / (n_gt * Vd * (r_gt**d)) if r_gt > 0 else 0.0
-            q_hat = k / (n_pred * Vd * (r_pred**d)) if r_pred > 0 else 0.0
-        else:
-            # Radius mode
-            gt_neighbors = gt_tree.query_ball_point(pos, radius)
-            pred_neighbors = pred_tree.query_ball_point(pos, radius)
-
-            k_gt = len(gt_neighbors)
-            k_pred = len(pred_neighbors)
-
-            p_hat = k_gt / (n_gt * Vd * (radius**d)) if radius > 0 else 0.0
-            q_hat = k_pred / (n_pred * Vd * (radius**d)) if radius > 0 else 0.0
-
-        # Add eps to avoid instability
-        p_hat = max(p_hat, eps)
-        q_hat = max(q_hat, eps)
-
-        results.append(p_hat * np.log(p_hat / q_hat))
-
-    return results if return_list else np.mean(results) if results else 0.0
+    p_hat = np.maximum(p_hat, eps)
+    q_hat = np.maximum(q_hat, eps)
+    results = p_hat * np.log(p_hat / q_hat)
+    return results.tolist() if return_list else float(np.mean(results)) if len(results) > 0 else 0.0
 
 
 import numpy as np
@@ -431,9 +381,6 @@ def soft_correlation(
     gt_tree = cKDTree(gt_positions)
     pred_tree = cKDTree(pred_positions)
 
-    gt_sums = []
-    pred_sums = []
-
     if sample is not None:
         percent = sample
         n = int(len(gt_positions) * percent / 100)
@@ -442,41 +389,50 @@ def soft_correlation(
     else:
         samples = gt_positions
 
-    correlations_all = []
-    for i, pos in tqdm(list(enumerate(samples))):
-        if k > 0:
-            gt_distances, gt_indices = gt_tree.query(pos, k=k + 1)
-            pred_distances, pred_indices = pred_tree.query(pos, k=k + 1)
-            gt_neighbors = gt_indices[1:]  # exclude self
-            pred_neighbors = pred_indices[1:]
-        else:
-            gt_neighbors = gt_tree.query_ball_point(pos, radius)
-            pred_neighbors = pred_tree.query_ball_point(pos, radius)
+    if k > 0:
+        # Fully vectorized kNN path
+        _, gt_all_idx = gt_tree.query(samples, k=k + 1, workers=-1)   # (M, k+1)
+        _, pred_all_idx = pred_tree.query(samples, k=k + 1, workers=-1)
+        gt_sums_mat = gt_expressions[gt_all_idx[:, 1:]].sum(axis=1)   # (M, G)
+        pred_sums_mat = pred_expressions[pred_all_idx[:, 1:]].sum(axis=1)
 
-        gt_sum = np.sum(gt_expressions[gt_neighbors], axis=0)
-        pred_sum = np.sum(pred_expressions[pred_neighbors], axis=0)
+        if return_list:
+            correlations_all = [corr_fn(gt_sums_mat[i], pred_sums_mat[i])[0] for i in range(len(samples))]
+            return correlations_all
 
-        gt_sums.append(gt_sum)
-        pred_sums.append(pred_sum)
+        gt_sums = gt_sums_mat.flatten()
+        pred_sums = pred_sums_mat.flatten()
+    else:
+        # Radius path: batch query with workers=-1, loop only for variable-length sums
+        gt_neighbors_all = gt_tree.query_ball_point(samples, radius, workers=-1)
+        pred_neighbors_all = pred_tree.query_ball_point(samples, radius, workers=-1)
 
-        pred_sum[0] = (
-            pred_sum[0] + 1e-15
-        )  # to avoid NaN in pearsonr when pred_sum is all zeros
+        gt_sums_list = []
+        pred_sums_list = []
+        correlations_all = []
+        for i, (gt_nbrs, pred_nbrs) in enumerate(zip(gt_neighbors_all, pred_neighbors_all)):
+            gt_sum = gt_expressions[gt_nbrs].sum(axis=0) if len(gt_nbrs) > 0 else np.zeros(gt_expressions.shape[1])
+            pred_sum = pred_expressions[pred_nbrs].sum(axis=0) if len(pred_nbrs) > 0 else np.zeros(pred_expressions.shape[1])
+            gt_sums_list.append(gt_sum)
+            pred_sums_list.append(pred_sum)
+            if return_list:
+                pred_sum[0] = pred_sum[0] + 1e-15
+                correlations_all.append(corr_fn(gt_sum, pred_sum)[0])
+            if i % 10000 == 0 and i > 0:
+                print(f"Processed {i} samples...")
 
-        correlations_all.append(corr_fn(gt_sum, pred_sum)[0])
+        if return_list:
+            return correlations_all
 
-        if i % 10000 == 0 and i > 0:
-            print(f"Processed {i} samples...")
-
-    gt_sums = np.array(gt_sums).flatten()
-    pred_sums = np.array(pred_sums).flatten()
+        gt_sums = np.array(gt_sums_list).flatten() if gt_sums_list else np.array([])
+        pred_sums = np.array(pred_sums_list).flatten() if pred_sums_list else np.array([])
 
     if len(gt_sums) == 0 or len(pred_sums) == 0:
         return 0.0
 
-    if return_list:
-        return correlations_all
-
+    # Avoid NaN when pred is all zeros
+    pred_sums = pred_sums.copy()
+    pred_sums[0] = pred_sums[0] + 1e-15
     correlation, _ = corr_fn(gt_sums, pred_sums)
     return correlation
 
@@ -551,10 +507,6 @@ def soft_f1(
     gt_tree = cKDTree(gt_positions)
     pred_tree = cKDTree(pred_positions)
 
-    precisions = []
-    recalls = []
-    f1s = []
-
     # sampling
     if sample is not None:
         n = int(len(gt_positions) * sample / 100)
@@ -563,46 +515,60 @@ def soft_f1(
     else:
         samples = gt_positions
 
-    for i, pos in enumerate(tqdm(samples, desc="spots")):
-        # find neighbors
-        if k > 0:
-            _, gt_idx = gt_tree.query(pos, k=k + 1)
-            _, pred_idx = pred_tree.query(pos, k=k + 1)
-            gt_nbrs = gt_idx[1:]
-            pred_nbrs = pred_idx[1:]
-        else:
-            gt_nbrs = gt_tree.query_ball_point(pos, radius)
-            pred_nbrs = pred_tree.query_ball_point(pos, radius)
+    if k > 0:
+        # Fully vectorized kNN path
+        _, gt_all_idx = gt_tree.query(samples, k=k + 1, workers=-1)   # (M, k+1)
+        _, pred_all_idx = pred_tree.query(samples, k=k + 1, workers=-1)
+        gt_sums = gt_expressions[gt_all_idx[:, 1:]].sum(axis=1)       # (M, G)
+        pred_sums = pred_expressions[pred_all_idx[:, 1:]].sum(axis=1)
 
-        # sum expressions over neighbors
-        gt_sum = np.sum(gt_expressions[gt_nbrs], axis=0)
-        pred_sum = np.sum(pred_expressions[pred_nbrs], axis=0)
+        pred_pos = pred_sums > 0                                        # (M, G) bool
+        gt_pos = gt_sums > 0
+        n_pred_pos = pred_pos.sum(axis=1).astype(float)                # (M,)
+        n_gt_pos = gt_pos.sum(axis=1).astype(float)
+        true_pos = np.logical_and(pred_pos, gt_pos).sum(axis=1).astype(float)
 
-        # compute precision: TP / (predicted positives)
-        pred_pos = pred_sum > 0
-        if pred_pos.sum() > 0:
-            true_pos = np.logical_and(pred_pos, gt_sum > 0).sum()
-            precisions.append(true_pos / pred_pos.sum())
-            recalls.append(
-                true_pos / (gt_sum > 0).sum() if (gt_sum > 0).sum() > 0 else 0.0
-            )
-            f1s.append(
-                2 * precisions[-1] * recalls[-1] / (precisions[-1] + recalls[-1])
-                if (precisions[-1] + recalls[-1]) > 0
-                else 0.0
-            )
-        else:
-            precisions.append(0.0)
-            recalls.append(0.0)
-            f1s.append(0.0)
+        precisions_arr = np.where(n_pred_pos > 0, true_pos / n_pred_pos, 0.0)
+        recalls_arr = np.where(n_gt_pos > 0, true_pos / n_gt_pos, 0.0)
+        denom = precisions_arr + recalls_arr
+        f1s_arr = np.where(denom > 0, 2 * precisions_arr * recalls_arr / denom, 0.0)
 
-        if i and i % 10000 == 0:
-            print(f"Processed {i} spots...")
+        if return_list:
+            return f1s_arr.tolist()
+        return (float(np.mean(f1s_arr)), float(np.mean(precisions_arr)), float(np.mean(recalls_arr)))
+    else:
+        # Radius path: batch query with workers=-1
+        gt_neighbors_all = gt_tree.query_ball_point(samples, radius, workers=-1)
+        pred_neighbors_all = pred_tree.query_ball_point(samples, radius, workers=-1)
 
-    if return_list:
-        return f1s
-    return (
-        float(np.mean(f1s)) if f1s else 0.0,
-        float(np.mean(precisions)) if precisions else 0.0,
-        float(np.mean(recalls)) if recalls else 0.0,
-    )
+        precisions = []
+        recalls = []
+        f1s = []
+        for i, (gt_nbrs, pred_nbrs) in enumerate(zip(gt_neighbors_all, pred_neighbors_all)):
+            gt_sum = gt_expressions[gt_nbrs].sum(axis=0) if len(gt_nbrs) > 0 else np.zeros(gt_expressions.shape[1])
+            pred_sum = pred_expressions[pred_nbrs].sum(axis=0) if len(pred_nbrs) > 0 else np.zeros(pred_expressions.shape[1])
+
+            pred_pos = pred_sum > 0
+            n_pred_pos = pred_pos.sum()
+            if n_pred_pos > 0:
+                true_pos = np.logical_and(pred_pos, gt_sum > 0).sum()
+                p = true_pos / n_pred_pos
+                n_gt_pos = (gt_sum > 0).sum()
+                r = true_pos / n_gt_pos if n_gt_pos > 0 else 0.0
+                f1 = 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+            else:
+                p, r, f1 = 0.0, 0.0, 0.0
+            precisions.append(p)
+            recalls.append(r)
+            f1s.append(f1)
+
+            if i and i % 10000 == 0:
+                print(f"Processed {i} spots...")
+
+        if return_list:
+            return f1s
+        return (
+            float(np.mean(f1s)) if f1s else 0.0,
+            float(np.mean(precisions)) if precisions else 0.0,
+            float(np.mean(recalls)) if recalls else 0.0,
+        )
