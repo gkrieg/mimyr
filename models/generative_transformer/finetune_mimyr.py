@@ -410,19 +410,25 @@ def _build_valid_gene_mask(adata, var_names):
 def _evaluate_metrics_vectorized(
     adata_X,
     idxs,
-    logits_labels,       # (B, T, V) CPU tensor
-    logits_exp_real,     # (B, T, 1) CPU tensor
+    logits_labels,       # (B, T, V) CPU tensor  — ignored when token_preds_np is given
+    logits_exp_real,     # (B, T, 1) CPU tensor  — ignored when expr_vals_np is given
     labels,              # (B, T) numpy int array; -100 marks prompt/pad
     token_to_var_idx,    # (vocab_size,) int32; -1 = not a gene
     valid_gene_mask,     # (n_genes,) bool
     n_genes,
     mask_token_id=-100,
     threshold=0.0,
+    token_preds_np=None,  # pre-computed (B, T) int64 numpy array (argmax already done on GPU)
+    expr_vals_np=None,    # pre-computed (B, T) float32 numpy array (squeeze already done on GPU)
 ):
     """Fully-vectorized batch evaluation: Pearson r, F1, precision, recall."""
-    B = logits_labels.shape[0]
-    token_preds = logits_labels.argmax(dim=-1).numpy()         # (B, T) int64
-    expr_vals   = logits_exp_real.squeeze(-1).float().numpy()  # (B, T) float32
+    if token_preds_np is not None:
+        B = token_preds_np.shape[0]
+        token_preds = token_preds_np
+    else:
+        B = logits_labels.shape[0]
+        token_preds = logits_labels.argmax(dim=-1).numpy()         # (B, T) int64
+    expr_vals = expr_vals_np if expr_vals_np is not None else logits_exp_real.squeeze(-1).float().numpy()  # (B, T) float32
 
     # Build predicted expression matrix via scatter — no Python per-cell loop
     valid_pos = labels != mask_token_id                  # (B, T)
@@ -791,11 +797,16 @@ def train(args):
         device = torch.device(args.device)
 
     # Fast early exit: if --preprocess-only and cache already exists, nothing to do.
-    _train_cache = os.path.join(args.output_dir, "train.h5ad")
-    _val_cache = os.path.join(args.output_dir, "val.h5ad")
-    if getattr(args, "preprocess_only", False) and os.path.exists(_train_cache) and os.path.exists(_val_cache):
+    def _find_cache(stem):
+        for ext in (".slaf", ".h5ad"):
+            p = os.path.join(args.output_dir, stem + ext)
+            if os.path.exists(p):
+                return p
+        return None
+
+    if getattr(args, "preprocess_only", False) and _find_cache("train") and _find_cache("val"):
         if rank == 0:
-            print(f"Cache already exists at {args.output_dir} (train.h5ad + val.h5ad). Nothing to do.")
+            print(f"Cache already exists at {args.output_dir}. Nothing to do.")
         return
 
     # 1) Load pretrained checkpoint
@@ -892,15 +903,16 @@ def train(args):
     import scanpy as _sc
     from data_loader import SliceDataLoader
 
-    train_cache = os.path.join(args.output_dir, "train.h5ad")
-    val_cache = os.path.join(args.output_dir, "val.h5ad")
-    cache_exists = os.path.exists(train_cache) and os.path.exists(val_cache)
+    train_cache = _find_cache("train")
+    val_cache = _find_cache("val")
+    cache_exists = train_cache is not None and val_cache is not None
 
     if cache_exists:
         if rank == 0:
-            print(f"Loading preprocessed adata from cache in {args.output_dir}")
-        adata_train = _sc.read_h5ad(train_cache)
-        adata_val = _sc.read_h5ad(val_cache)
+            print(f"Loading preprocessed adata from cache in {args.output_dir} ({os.path.basename(train_cache)}, {os.path.basename(val_cache)})")
+        from data_loader import _read_slice
+        adata_train = _read_slice(train_cache)
+        adata_val = _read_slice(val_cache)
         adata_test = None
     else:
         cfg = {
@@ -931,9 +943,10 @@ def train(args):
 
         if rank == 0:
             # _build_adata writes train.h5ad when adata2 is set; write it here if not already done
-            if not os.path.exists(train_cache):
-                adata_train.write(train_cache)
-            adata_val.write(val_cache)
+            _train_write = os.path.join(args.output_dir, "train.h5ad")
+            if not os.path.exists(_train_write):
+                adata_train.write(_train_write)
+            adata_val.write(os.path.join(args.output_dir, "val.h5ad"))
             print(f"Cached preprocessed adata to {args.output_dir}")
 
     if getattr(args, "preprocess_only", False):
@@ -1284,9 +1297,8 @@ def train(args):
         if val_loader is not None:
             model.eval()
             v_loss, v_cls, v_exp_bin, v_exp_real, count = 0.0, 0.0, 0.0, 0.0, 0
-            all_pearson_rs = []
-            all_val_f1, all_val_prec, all_val_rec = [], [], []
-            with torch.no_grad():
+            _val_tok_preds, _val_expr_vals, _val_labels, _val_idxs = [], [], [], []
+            with torch.inference_mode():
                 for batch in tqdm(val_loader, desc=f"Epoch {epoch} [val]"):
                     input_ids = batch["input_ids"].to(device)
                     attention_mask = batch["attention_mask"].to(device)
@@ -1311,21 +1323,39 @@ def train(args):
                     v_exp_bin += leb.item()
                     v_exp_real += ler.item()
                     count += 1
-                    _lnp_val = labels.detach().cpu().numpy() if hasattr(labels, "detach") else np.asarray(labels)
-                    pearson_rs, f1s, precs, recs = _evaluate_metrics_vectorized(
-                        adata_X=adata_val.X,
-                        idxs=batch.get("idx", range(logits_labels.shape[0])),
-                        logits_labels=logits_labels.cpu(),
-                        logits_exp_real=logits_exp_real.cpu(),
-                        labels=_lnp_val,
-                        token_to_var_idx=token_to_var_idx_val,
-                        valid_gene_mask=valid_gene_mask_val,
-                        n_genes=n_genes_val,
+                    # Compute argmax/squeeze on GPU before transfer — reduces (B,T,V)→(B,T),
+                    # cutting GPU→CPU bandwidth ~500x vs transferring full logits.
+                    _tok_np = logits_labels.argmax(dim=-1).cpu().numpy()
+                    _exp_np = logits_exp_real.squeeze(-1).float().cpu().numpy()
+                    _lnp_val = labels.cpu().numpy() if hasattr(labels, "cpu") else np.asarray(labels)
+                    _idx_val = batch.get("idx", range(logits_labels.shape[0]))
+                    if hasattr(_idx_val, "cpu"):
+                        _idx_val = _idx_val.cpu()
+                    _val_tok_preds.append(_tok_np)
+                    _val_expr_vals.append(_exp_np)
+                    _val_labels.append(_lnp_val)
+                    _val_idxs.append(
+                        _idx_val if isinstance(_idx_val, np.ndarray) else np.asarray(list(_idx_val))
                     )
-                    all_pearson_rs.extend(pearson_rs)
-                    all_val_f1.extend(f1s)
-                    all_val_prec.extend(precs)
-                    all_val_rec.extend(recs)
+
+            # GPU loop is done; compute metrics once over the full val set.
+            # One sparse slice is far cheaper than 216 per-batch sparse slices.
+            _all_tok = np.concatenate(_val_tok_preds, axis=0)
+            _all_exp = np.concatenate(_val_expr_vals, axis=0)
+            _all_lnp = np.concatenate(_val_labels, axis=0)
+            _all_idx = np.concatenate(_val_idxs, axis=0)
+            all_pearson_rs, all_val_f1, all_val_prec, all_val_rec = _evaluate_metrics_vectorized(
+                adata_X=adata_val.X,
+                idxs=_all_idx,
+                logits_labels=None,
+                logits_exp_real=None,
+                labels=_all_lnp,
+                token_to_var_idx=token_to_var_idx_val,
+                valid_gene_mask=valid_gene_mask_val,
+                n_genes=n_genes_val,
+                token_preds_np=_all_tok,
+                expr_vals_np=_all_exp,
+            )
 
             avg_v_loss = v_loss / count
             avg_v_cls = v_cls / count
@@ -1359,10 +1389,8 @@ def train(args):
         if test_loader is not None:
             model.eval()
             t_loss, t_cls, t_exp_bin, t_exp_real, t_count = 0.0, 0.0, 0.0, 0.0, 0
-            all_test_pearson_rs = []
-            all_test_f1, all_test_prec, all_test_rec = [], [], []
-            all_test_cell_idxs = []
-            with torch.no_grad():
+            _test_tok_preds, _test_expr_vals, _test_labels, _test_idxs = [], [], [], []
+            with torch.inference_mode():
                 for batch in tqdm(test_loader, desc=f"Epoch {epoch} [test]"):
                     input_ids = batch["input_ids"].to(device)
                     attention_mask = batch["attention_mask"].to(device)
@@ -1387,25 +1415,37 @@ def train(args):
                     t_exp_bin += leb.item()
                     t_exp_real += ler.item()
                     t_count += 1
-                    _lnp_test = labels.detach().cpu().numpy() if hasattr(labels, "detach") else np.asarray(labels)
-                    pearson_rs, f1s, precs, recs = _evaluate_metrics_vectorized(
-                        adata_X=adata_test.X,
-                        idxs=batch.get("idx", range(logits_labels.shape[0])),
-                        logits_labels=logits_labels.cpu(),
-                        logits_exp_real=logits_exp_real.cpu(),
-                        labels=_lnp_test,
-                        token_to_var_idx=token_to_var_idx_test,
-                        valid_gene_mask=valid_gene_mask_test,
-                        n_genes=n_genes_test,
+                    _tok_np = logits_labels.argmax(dim=-1).cpu().numpy()
+                    _exp_np = logits_exp_real.squeeze(-1).float().cpu().numpy()
+                    _lnp_test = labels.cpu().numpy() if hasattr(labels, "cpu") else np.asarray(labels)
+                    _idx_test = batch.get("idx", range(logits_labels.shape[0]))
+                    if hasattr(_idx_test, "cpu"):
+                        _idx_test = _idx_test.cpu()
+                    _test_tok_preds.append(_tok_np)
+                    _test_expr_vals.append(_exp_np)
+                    _test_labels.append(_lnp_test)
+                    _test_idxs.append(
+                        _idx_test if isinstance(_idx_test, np.ndarray) else np.asarray(list(_idx_test))
                     )
-                    all_test_pearson_rs.extend(pearson_rs)
-                    all_test_f1.extend(f1s)
-                    all_test_prec.extend(precs)
-                    all_test_rec.extend(recs)
-                    idxs = batch.get("idx", [])
-                    all_test_cell_idxs.extend(
-                        idxs.tolist() if hasattr(idxs, "tolist") else list(idxs)
-                    )
+
+            # GPU loop done; compute metrics once over the full test set
+            _all_test_tok = np.concatenate(_test_tok_preds, axis=0)
+            _all_test_exp = np.concatenate(_test_expr_vals, axis=0)
+            _all_test_lnp = np.concatenate(_test_labels, axis=0)
+            _all_test_idx = np.concatenate(_test_idxs, axis=0)
+            all_test_pearson_rs, all_test_f1, all_test_prec, all_test_rec = _evaluate_metrics_vectorized(
+                adata_X=adata_test.X,
+                idxs=_all_test_idx,
+                logits_labels=None,
+                logits_exp_real=None,
+                labels=_all_test_lnp,
+                token_to_var_idx=token_to_var_idx_test,
+                valid_gene_mask=valid_gene_mask_test,
+                n_genes=n_genes_test,
+                token_preds_np=_all_test_tok,
+                expr_vals_np=_all_test_exp,
+            )
+            all_test_cell_idxs = _all_test_idx.tolist()
 
             avg_t_loss = t_loss / t_count
             avg_t_cls = t_cls / t_count
