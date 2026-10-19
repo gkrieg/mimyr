@@ -10,6 +10,14 @@ import numpy as np
 from torch.nn import functional as F
 from transformers.generation.utils import SampleDecoderOnlyOutput
 
+from .wtf_bias import (
+    apply_gene_presence_bias,
+    apply_bin_value_bias,
+    mix_gene_probs,
+    mix_bin_probs,
+    blend_real_value,
+)
+
 
 class LayerNorm(nn.Module):
 
@@ -745,6 +753,17 @@ class MimyrModel(nn.Module):
         override_expr_sequence: Optional[torch.LongTensor] = None,
         verbose: bool = False,
         select_max_index_margin: float = 0.0,
+        wtf_present_mask=None,
+        wtf_prior_bin=None,
+        wtf_prior_valid=None,
+        wtf_alpha_gene=0.0,
+        wtf_alpha_bin=0.0,
+        wtf_bin_sigma=0.0,
+        wtf_unexpressed_mode="none",
+        wtf_prior_real=None,
+        wtf_strength_gene=0.0,
+        wtf_strength_bin=0.0,
+        wtf_strength_value=0.0,
     ):
         """
         Autoregressively generate gene tokens *and* real-valued expression.
@@ -788,6 +807,15 @@ class MimyrModel(nn.Module):
             seen = input_ids[0, :-1]
             logits_cls[:, seen] = float("-inf")
 
+            # Capture legality BEFORE top-k so reference guidance can reach the
+            # full reference gene set (see model_kvcache fast loop). None when the
+            # override is inactive so the no-op path stays byte-identical.
+            finite_pre_topk = (
+                torch.isfinite(logits_cls)
+                if (wtf_present_mask is not None and wtf_strength_gene > 0.0)
+                else None
+            )
+
             # 3) top-k filter
             if top_k is not None:
                 v, _ = torch.topk(logits_cls, min(top_k, logits_cls.size(-1)), dim=-1)
@@ -798,11 +826,34 @@ class MimyrModel(nn.Module):
             token_range = torch.arange(logits_cls.size(-1), device=logits_cls.device).unsqueeze(0)
             logits_cls = logits_cls.masked_fill(token_range >= prev_tokens.unsqueeze(1), float("-inf"))
 
+            # Weak teacher forcing: gene-presence bias (full batch order, eos==0).
+            if wtf_present_mask is not None:
+                logits_cls = apply_gene_presence_bias(
+                    logits_cls, wtf_present_mask, wtf_prior_valid,
+                    wtf_alpha_gene, 0,
+                )
+
             if return_dict_in_generate:
                 scores += (logits_cls,)
 
+            # Reference legality ignores top-k (see model_kvcache fast loop): the
+            # override may reach any reference gene legal under the hard seen +
+            # order masks, so s=1 reproduces the full reference set.
+            ref_legal = (
+                finite_pre_topk & (token_range < prev_tokens.unsqueeze(1))
+                if finite_pre_topk is not None
+                else None
+            )
+
             # 4) sample model predictions
             probs = F.softmax(logits_cls, dim=-1)
+            # Reference guidance: mix the next-gene distribution toward the
+            # reference's still-legal genes (prob-space; exact override at s=1).
+            if ref_legal is not None:
+                probs = mix_gene_probs(
+                    probs, wtf_present_mask, wtf_prior_valid,
+                    ref_legal, wtf_strength_gene, 0,
+                )
             if select_max_index_margin > 0.0:
                 # Among still-allowed (finite) tokens whose probability is within
                 # `margin` of the top probability, pick the HIGHEST token index.
@@ -811,12 +862,18 @@ class MimyrModel(nn.Module):
                 # it never falls back to sampling.
                 forced_eos = probs[:, 0] >= 0.95
                 max_prob = probs.max(dim=-1, keepdim=True).values  # (B,1)
-                eligible = ((max_prob - probs) < select_max_index_margin) & torch.isfinite(logits_cls)  # (B,V)
+                # Include reference genes the override revived outside top-k;
+                # fall back to the post-mask finite set when inactive (no-op).
+                elig_finite = ref_legal if ref_legal is not None else torch.isfinite(logits_cls)
+                eligible = ((max_prob - probs) < select_max_index_margin) & elig_finite  # (B,V)
                 token_indices = torch.arange(
                     logits_cls.size(-1), device=logits_cls.device
                 ).unsqueeze(0).expand_as(logits_cls)
                 next_token_raw = token_indices.masked_fill(~eligible, -1).max(dim=-1, keepdim=True).values  # (B,1)
-                next_token = torch.where(forced_eos.unsqueeze(1), next_token_raw.new_full((next_token_raw.size(0), 1), 0), next_token_raw)
+                # next_token_raw < 0 (no eligible token) -> terminate with EOS
+                # instead of writing -1 back (reference guidance can force EOS mass
+                # onto a masked EOS logit; -1 would OOB the embedding next step).
+                next_token = torch.where(forced_eos.unsqueeze(1) | (next_token_raw < 0), next_token_raw.new_full((next_token_raw.size(0), 1), 0), next_token_raw)
             else:
                 probs[:, 0] = gamma * probs[:, 0]
                 next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
@@ -826,7 +883,31 @@ class MimyrModel(nn.Module):
             finished |= newly_finished
 
             next_expr_real = logits_exp_real.contiguous()  # (B, 1)
-            bin_next = torch.argmax(logits_exp_bins, dim=-1, keepdim=True)  # (B, 1)
+            # Reference guidance: blend the regressor's real value toward the
+            # reference's real expression for the chosen gene (exact at s=1).
+            if wtf_prior_real is not None and wtf_strength_value > 0.0:
+                next_expr_real = blend_real_value(
+                    next_expr_real, next_token, wtf_prior_real,
+                    wtf_prior_valid, wtf_strength_value,
+                )
+
+            # Reference guidance / weak teacher forcing for the expression bin.
+            if wtf_prior_bin is not None and wtf_strength_bin > 0.0:
+                # Prob-space mixing toward the reference bin (exact at s=1).
+                bin_probs = F.softmax(logits_exp_bins, dim=-1)
+                bin_probs = mix_bin_probs(
+                    bin_probs, next_token, wtf_prior_bin, wtf_prior_valid,
+                    wtf_strength_bin, wtf_unexpressed_mode,
+                )
+                bin_next = torch.argmax(bin_probs, dim=-1, keepdim=True)  # (B, 1)
+            else:
+                # Legacy additive-logit bias (no-op when alphas/sigma == 0).
+                if wtf_prior_bin is not None:
+                    logits_exp_bins = apply_bin_value_bias(
+                        logits_exp_bins, next_token, wtf_prior_bin, wtf_prior_valid,
+                        wtf_alpha_bin, wtf_bin_sigma, wtf_unexpressed_mode,
+                    )
+                bin_next = torch.argmax(logits_exp_bins, dim=-1, keepdim=True)  # (B, 1)
 
             # 5) record model predictions
             predicted_gene_tokens.append(next_token)

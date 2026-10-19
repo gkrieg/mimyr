@@ -30,6 +30,7 @@ class _AnndataGenDataset(Dataset):
         add_xyz_noise: bool,
         min_max_bounds: List[int],
         exclude_columns: List[str] = None,
+        xyz_noise_magnitude: int = 2,
     ):
         """
         Expects:
@@ -46,6 +47,7 @@ class _AnndataGenDataset(Dataset):
         self.add_xyz_noise = add_xyz_noise
         self.min_max_bounds = min_max_bounds
         self.exclude_columns = exclude_columns
+        self.xyz_noise_magnitude = xyz_noise_magnitude
 
     def __len__(self):
         return self.adata.n_obs
@@ -60,6 +62,7 @@ class _AnndataGenDataset(Dataset):
             self.add_xyz_noise,
             self.min_max_bounds,
             self.exclude_columns,
+            xyz_noise_magnitude=self.xyz_noise_magnitude,
         )
         prompt_tokens += self.tok.encode([self.sep_token])
         prompt_vals += [0]
@@ -351,6 +354,7 @@ def get_generation_dataloader(
     include_0s: bool = True,
     n_express_level: int = 10,
     add_xyz_noise: bool = False,
+    xyz_noise_magnitude: int = 2,
     exclude_columns: Optional[List[str]] = None,
     # --- new knobs for weighted sampling ---
     use_sampling_probs: bool = True,  # respect adata.obs['sampling_prob'] if present
@@ -391,6 +395,7 @@ def get_generation_dataloader(
         scm=scm,
         include_0s=include_0s,
         add_xyz_noise=add_xyz_noise,
+        xyz_noise_magnitude=xyz_noise_magnitude,
         min_max_bounds=[0, n_express_level - 1],
         exclude_columns=exclude_columns,
     )

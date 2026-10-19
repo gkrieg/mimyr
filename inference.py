@@ -324,6 +324,182 @@ class Inference:
 
         return adata
 
+    def _reference_pool(self):
+        """Concatenated reference cells backing the nearest-neighbour lookups.
+
+        Cached on the SliceDataLoader, which outlives the per-test-slice Inference
+        objects, so a whole-brain pool (rq4_noref: 2.61M cells over 129 slices) is
+        concatenated once for the whole run instead of once per test slice. Modes
+        that hand out a fresh two-slice bracket per test slice get a fresh list
+        object each iteration and so miss the cache, exactly as before.
+
+        Optionally narrowed to a slab around the test slice along the section axis
+        (--ref_slab); off by default, in which case the full pool is used.
+        """
+        sdl = self.slice_data_loader
+        ref_slices = sdl.reference_slices
+
+        cached = getattr(sdl, "_ref_pool_cache", None)
+        if cached is not None and cached[0] is ref_slices:
+            ref_tissue = cached[1]
+        else:
+            ref_tissue = ad.concat(ref_slices)
+            sdl._ref_pool_cache = (ref_slices, ref_tissue)
+
+        if getattr(self, "ref_sample", None):
+            pct = self.ref_sample
+            n = int(len(ref_tissue) * pct / 100)
+            ref_tissue = ref_tissue[
+                np.random.choice(len(ref_tissue), size=n, replace=False)
+            ].copy()
+
+        slab = self.config.get("ref_slab")
+        if slab:
+            ax = section_axis(self.config["data_mode"])
+            centre = sdl.test_slices[0].obsm["aligned_spatial"][:, ax].mean()
+            pos = np.asarray(ref_tissue.obsm["aligned_spatial"])[:, ax]
+            keep = np.abs(pos - centre) <= slab
+            print(
+                f"[ref_slab] axis={ax} centre={centre:.3f} slab={slab}: kept "
+                f"{int(keep.sum())}/{len(keep)} reference cells "
+                f"({100.0 * keep.mean():.1f}%)"
+            )
+            ref_tissue = ref_tissue[keep].copy()
+
+        return ref_tissue
+
+    @staticmethod
+    def _nearest_same_type(ref_ct, ref_pos, pred_ct, pred_pos):
+        """Row index into the reference pool of each predicted cell's nearest
+        same-cell-type reference cell (k=1, full 3-D aligned-spatial distance).
+
+        Returning indices rather than expression vectors is what keeps this usable
+        on a whole-brain pool: the caller gathers only the n_pred matched rows
+        instead of densifying the entire reference matrix.
+
+        Returns (nbr, valid); `valid` is False for predicted cells whose cell type
+        has no reference cell at all, and those `nbr` entries are meaningless.
+        """
+        ref_by_type = defaultdict(list)
+        for i, ct in enumerate(ref_ct):
+            ref_by_type[ct].append(i)
+
+        nbr = np.zeros(len(pred_pos), dtype=np.int64)
+        valid = np.zeros(len(pred_pos), dtype=bool)
+        for ct, idxs in ref_by_type.items():
+            mask = pred_ct == ct
+            if not mask.any():
+                continue
+            idxs = np.asarray(idxs)
+            _, nbrs = cKDTree(ref_pos[idxs]).query(pred_pos[mask], k=1)
+            nbr[mask] = idxs[nbrs]
+            valid[mask] = True
+        return nbr, valid
+
+    @staticmethod
+    def _gather_dense(X, rows):
+        """Densify only the requested rows of a (possibly sparse) matrix."""
+        sel = X[rows]
+        try:
+            return np.asarray(sel.todense())
+        except AttributeError:
+            return np.asarray(sel)
+
+    def _build_lookup_prior(self, pred_data, scml, meta_info):
+        """Per-cell expression prior for weak teacher forcing.
+
+        For each predicted cell, find the nearest SAME-cell-type reference cell
+        by 3D aligned-spatial distance (the legitimate, test-time-available
+        `lookup` baseline) and copy its raw expression vector. Bin that vector
+        with the model's training rule, then scatter into vocab-width tensors so
+        the AR loops can softly bias gene presence + expression bins.
+
+        Returns
+        -------
+        present_mask : (n_pred, V) bool torch tensor -- True at gene-token ids
+            the prior wants expressed.
+        prior_bin    : (n_pred, V) long torch tensor -- lookup expression bin at
+            each gene token id (0 elsewhere).
+        prior_valid  : (n_pred,) bool torch tensor -- False for cells whose cell
+            type has no reference neighbor (those rows get zero bias).
+        prior_real   : (n_pred, V) float torch tensor -- lookup real (normalized
+            + log1p) expression at each gene token id (0 elsewhere), used by the
+            value-override path.
+        """
+        # --- nearest same-type reference cell (k=1), mirroring the lookup branch ---
+        ref_tissue = self._reference_pool()
+
+        ref_ct = np.array(ref_tissue.obs["token"].tolist())
+        ref_pos = np.array(ref_tissue.obsm["aligned_spatial"])
+
+        pred_ct = np.array(pred_data.obs["token"].tolist())
+        pred_pos = np.array(pred_data.obsm["spatial"])
+        n_pred = len(pred_pos)
+
+        nbr, prior_valid = self._nearest_same_type(
+            ref_ct, ref_pos, pred_ct, pred_pos
+        )
+        prior_expr_ref = self._gather_dense(ref_tissue.X, nbr).astype(float)
+        # cells whose type has no reference neighbour stay all-zero, as before
+        prior_expr_ref[~prior_valid] = 0.0
+        print(
+            f"[wtf] reference pool: {ref_tissue.n_obs} cells; "
+            f"prior_valid {100.0 * prior_valid.mean():.1f}% of {n_pred} predicted cells"
+        )
+
+        # --- reindex onto the model's gene panel order (genes absent -> 0 -> bin 0) ---
+        gene_set = list(meta_info["gene_set"])
+        prior_expr = (
+            pd.DataFrame(prior_expr_ref, columns=list(ref_tissue.var_names))
+            .reindex(columns=gene_set, fill_value=0.0)
+            .to_numpy(dtype=float)
+        )  # (n_pred, n_genes_panel)
+
+        # --- bin with the training rule (zeros -> 0; positives -> clipped digitize) ---
+        bin_edges = scml.bin_edges
+        bin_edges = bin_edges.numpy() if hasattr(bin_edges, "numpy") else np.asarray(bin_edges)
+        n_levels = scml.n_express_level
+        pos = prior_expr > 0
+        digit = np.clip(np.digitize(prior_expr, bin_edges, right=True), 1, n_levels - 1)
+        prior_bin_by_gene = np.zeros_like(prior_expr, dtype=np.int64)
+        prior_bin_by_gene[pos] = digit[pos]
+
+        # --- map panel genes -> vocab ids (fail loudly on misalignment) ---
+        gene_token_ids = np.array(scml.tokenizer.convert_tokens_to_ids(gene_set))
+        assert gene_token_ids.ndim == 1 and len(gene_token_ids) == len(gene_set), \
+            "gene->token id resolution failed"
+        assert not np.any(np.equal(gene_token_ids, None)), \
+            "some panel genes did not resolve to a vocab id"
+        gene_token_ids = gene_token_ids.astype(np.int64)
+
+        # --- scatter into compact vocab-width tensors ---
+        V = len(meta_info["token_set"])
+        present_mask = np.zeros((n_pred, V), dtype=bool)
+        prior_bin = np.zeros((n_pred, V), dtype=np.int64)
+        prior_real = np.zeros((n_pred, V), dtype=np.float32)
+        present_mask[:, gene_token_ids] = prior_bin_by_gene > 0
+        prior_bin[:, gene_token_ids] = prior_bin_by_gene
+        # Reference real expression (same normalized + log1p space as the
+        # regressor target) per gene token, for the value-override path.
+        prior_real[:, gene_token_ids] = prior_expr.astype(np.float32)
+
+        # Stash compact, gene-panel-aligned lookup info for offline analysis
+        # (analyze_wtf_jaccard.py). Attached to the returned `pred` so the
+        # nearest-neighbor used to steer each generated cell is recoverable
+        # without re-running the KDTree search.
+        self._wtf_lookup_bin = prior_bin_by_gene.astype(np.int16)
+        self._wtf_lookup_valid = prior_valid
+        self._wtf_gene_set = gene_set
+        self._wtf_bin_edges = np.asarray(bin_edges)
+        self._wtf_n_levels = int(n_levels)
+
+        return (
+            torch.from_numpy(present_mask),
+            torch.from_numpy(prior_bin),
+            torch.from_numpy(prior_valid),
+            torch.from_numpy(prior_real),
+        )
+
     def infer_expression(self, pred_data, real_data):
 
         exp_type = self.config["expression_inference_type"]
@@ -343,58 +519,28 @@ class Inference:
             return AnnData(X=rows, obs=obs, var=var, obsm=pred_data.obsm.copy()), None
 
         elif exp_type == "lookup":
-            # 1) build and subsample ref_tissue as before…
-            ref_tissue = ad.concat(self.slice_data_loader.reference_slices)
-            if getattr(self, "ref_sample", None):
-                pct = self.ref_sample
-                n = int(len(ref_tissue) * pct / 100)
-                ref_tissue = ref_tissue[
-                    np.random.choice(len(ref_tissue), size=n, replace=False)
-                ]
+            # 1) reference pool (cached concat, optional --ref_slab narrowing)
+            ref_tissue = self._reference_pool()
 
-            # 2) extract arrays
+            # 2) extract arrays — positions and labels only; expression is gathered
+            #    for the matched rows alone so this stays viable on a whole-brain pool
             ref_ct = np.array(ref_tissue.obs["token"].tolist())
             ref_pos = np.array(ref_tissue.obsm["aligned_spatial"])
-            try:
-                ref_exp = np.array(ref_tissue.X.todense())
-            except:
-                ref_exp = ref_tissue.X
 
             pred_ct = np.array(pred_data.obs["token"].tolist())
             pred_pos = np.array(pred_data.obsm["spatial"])
-            n_pred = len(pred_pos)
-            n_genes = ref_exp.shape[1]
 
-            # 3) index reference cells by type
+            # 3) nearest same-cell-type reference cell (k=1)
+            nbr, valid = self._nearest_same_type(ref_ct, ref_pos, pred_ct, pred_pos)
+            pred_lookup = self._gather_dense(ref_tissue.X, nbr)
+            # cells whose type has no reference neighbour stay all-zero, as before
+            pred_lookup[~valid] = 0
+            print(
+                f"[lookup] reference pool: {ref_tissue.n_obs} cells; matched "
+                f"{100.0 * valid.mean():.1f}% of {len(pred_pos)} predicted cells"
+            )
 
-            ref_by_type = defaultdict(list)
-            for i, ct in enumerate(ref_ct):
-                ref_by_type[ct].append(i)
-
-            # 4) build one KDTree per type
-            trees = {}
-            for ct, idxs in ref_by_type.items():
-                trees[ct] = (cKDTree(ref_pos[idxs]), idxs)
-
-            # 5) batch‑query per type
-            pred_lookup = np.zeros((n_pred, n_genes), dtype=ref_exp.dtype)
-            for ct, (tree, idxs) in trees.items():
-                # find all pred cells of this type
-                mask = pred_ct == ct
-                if not mask.any():
-                    continue
-                pts = pred_pos[mask]
-                k = min(1, len(idxs))
-                dists, nbrs = tree.query(pts, k=k)
-                # ensure shape (N, k)
-                if k == 1:
-                    nbrs = nbrs[:, None]
-                # gather and average
-                selected = ref_exp[idxs][nbrs]  # shape (N, k, n_genes)
-                means = selected.mean(axis=1)  # shape (N, n_genes)
-                pred_lookup[mask] = means
-
-            # 6) wrap up
+            # 4) wrap up
             return (
                 AnnData(
                     X=pred_lookup,
@@ -517,12 +663,50 @@ class Inference:
                 meta_info=meta_info,
                 use_kv_cache=True,
             )
-            # model_inference does not set bin_edges; teacher-forced GT binning needs them.
-            if teacher_fill and not hasattr(scml, "bin_edges"):
+            # Weak teacher forcing: softly steer free-running generation toward the
+            # same-cell-type lookup neighbor (test-time available, never the held-out
+            # GT). Default OFF => the prior tensors stay None and all three AR loops
+            # are byte-identical to standard inference.
+            weak_tf = bool(self.config.get("expression_weak_teacher_forcing", False))
+
+            # model_inference does not set bin_edges; teacher-forced GT binning and
+            # the WTF prior both need them for training-consistent binning. The edges
+            # encode the training binning rule, so they must be derived from real
+            # (positive) expression. In teacher-fill adata_sub.X already holds GT, but
+            # in free-running WTF it is all zeros -- so align real_data onto the model
+            # gene panel and build the edges from that instead.
+            if (teacher_fill or weak_tf) and not hasattr(scml, "bin_edges"):
+                if teacher_fill:
+                    edge_adata = adata_sub
+                else:
+                    real_X = real_data.X
+                    real_X = (
+                        real_X.toarray() if hasattr(real_X, "toarray") else np.asarray(real_X)
+                    )
+                    real_panel = (
+                        pd.DataFrame(real_X, columns=list(real_data.var_names))
+                        .reindex(columns=list(var.index), fill_value=0.0)
+                        .to_numpy(dtype=float)
+                    )
+                    edge_adata = AnnData(X=real_panel, var=var.copy())
                 bin_edges = compute_global_bin_edges(
-                    adata_sub, meta_info["gene_set"], scml.n_express_level
+                    edge_adata, meta_info["gene_set"], scml.n_express_level
                 )
                 scml.bin_edges = torch.tensor(bin_edges)
+
+            wtf_present_mask = wtf_prior_bin = wtf_prior_valid = wtf_prior_real = None
+            if weak_tf:
+                wtf_present_mask, wtf_prior_bin, wtf_prior_valid, wtf_prior_real = self._build_lookup_prior(
+                    pred_data, scml, meta_info
+                )
+
+            # Reference-guidance strengths: CLI/config knobs in [0, 100] mapped to
+            # the per-component mixing weight s in [0, 1] (0 = ignore reference,
+            # 100 = exact override of gene / bin / value by the reference cell).
+            wtf_strength_gene = float(self.config.get("wtf_strength_gene", 0.0)) / 100.0
+            wtf_strength_bin = float(self.config.get("wtf_strength_bin", 0.0)) / 100.0
+            wtf_strength_value = float(self.config.get("wtf_strength_value", 0.0)) / 100.0
+
             results = scml.generate_cell_genesis(
                 idx=range(len(pred_data.obs_names)),
                 max_new_tokens=500,
@@ -534,6 +718,17 @@ class Inference:
                 cheat_with_expr=cheat_with_expr,
                 fast=True,
                 select_max_index_margin=self.config.get("expression_select_max_index_margin", 0.01),
+                wtf_present_mask=wtf_present_mask,
+                wtf_prior_bin=wtf_prior_bin,
+                wtf_prior_valid=wtf_prior_valid,
+                wtf_alpha_gene=float(self.config.get("wtf_alpha_gene", 0.0)),
+                wtf_alpha_bin=float(self.config.get("wtf_alpha_bin", 0.0)),
+                wtf_bin_sigma=float(self.config.get("wtf_bin_sigma", 0.0)),
+                wtf_unexpressed_mode=str(self.config.get("wtf_unexpressed_mode", "none")),
+                wtf_prior_real=wtf_prior_real,
+                wtf_strength_gene=wtf_strength_gene,
+                wtf_strength_bin=wtf_strength_bin,
+                wtf_strength_value=wtf_strength_value,
             )
 
             if self.config.get("expression_verbose_eval", False):
@@ -573,6 +768,17 @@ class Inference:
 
             # 4) re-create
             adata = AnnData(X=rows, obs=obs, var=scml.adata.var, obsm=pred_data.obsm)
+
+            # Attach per-cell lookup prior (same row order as `rows`) so the
+            # Jaccard analysis can compare each generated cell against the exact
+            # reference neighbor that steered it. Only present when WTF was on.
+            if weak_tf:
+                adata.obsm["wtf_lookup_bin"] = self._wtf_lookup_bin
+                adata.obs["wtf_lookup_valid"] = self._wtf_lookup_valid
+                adata.uns["wtf_gene_set"] = list(self._wtf_gene_set)
+                adata.uns["wtf_bin_edges"] = self._wtf_bin_edges
+                adata.uns["wtf_n_express_level"] = self._wtf_n_levels
+
             return adata, results
 
     # === ORCHESTRATOR ===

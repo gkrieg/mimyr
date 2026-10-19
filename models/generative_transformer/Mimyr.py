@@ -139,6 +139,17 @@ class Mimyr:
         verbose: bool = False,
         fast=False,
         select_max_index_margin: float = 0.01,
+        wtf_present_mask=None,
+        wtf_prior_bin=None,
+        wtf_prior_valid=None,
+        wtf_alpha_gene: float = 0.0,
+        wtf_alpha_bin: float = 0.0,
+        wtf_bin_sigma: float = 0.0,
+        wtf_unexpressed_mode: str = "none",
+        wtf_prior_real=None,
+        wtf_strength_gene: float = 0.0,
+        wtf_strength_bin: float = 0.0,
+        wtf_strength_value: float = 0.0,
         **generate_kwargs,
     ):
         """
@@ -166,6 +177,19 @@ class Mimyr:
         for start in tqdm(range(0, len(idx), batch_size)):
             batch_start_time = time.time()
             batch_indices = idx[start : start + batch_size]
+
+            # Weak teacher forcing: slice the per-cell prior tensors to this batch's
+            # rows and move to device. The model methods only ever see contiguous
+            # batch slices, so the per-row tensors must be sliced explicitly here.
+            wtf_present_mask_b = wtf_prior_bin_b = wtf_prior_valid_b = None
+            wtf_prior_real_b = None
+            if wtf_present_mask is not None:
+                row_sel = torch.as_tensor(list(batch_indices), dtype=torch.long)
+                wtf_present_mask_b = wtf_present_mask[row_sel].to(self.device)
+                wtf_prior_bin_b = wtf_prior_bin[row_sel].to(self.device)
+                wtf_prior_valid_b = wtf_prior_valid[row_sel].to(self.device)
+                if wtf_prior_real is not None:
+                    wtf_prior_real_b = wtf_prior_real[row_sel].to(self.device)
 
             if verbose:
                 print(
@@ -299,6 +323,17 @@ class Mimyr:
                         ),
                         verbose=verbose,
                         select_max_index_margin=select_max_index_margin,
+                        wtf_present_mask=wtf_present_mask_b,
+                        wtf_prior_bin=wtf_prior_bin_b,
+                        wtf_prior_valid=wtf_prior_valid_b,
+                        wtf_alpha_gene=wtf_alpha_gene,
+                        wtf_alpha_bin=wtf_alpha_bin,
+                        wtf_bin_sigma=wtf_bin_sigma,
+                        wtf_unexpressed_mode=wtf_unexpressed_mode,
+                        wtf_prior_real=wtf_prior_real_b,
+                        wtf_strength_gene=wtf_strength_gene,
+                        wtf_strength_bin=wtf_strength_bin,
+                        wtf_strength_value=wtf_strength_value,
                         **generate_kwargs,
                     )
                 )
@@ -317,6 +352,17 @@ class Mimyr:
                         ),
                         verbose=verbose,
                         select_max_index_margin=select_max_index_margin,
+                        wtf_present_mask=wtf_present_mask_b,
+                        wtf_prior_bin=wtf_prior_bin_b,
+                        wtf_prior_valid=wtf_prior_valid_b,
+                        wtf_alpha_gene=wtf_alpha_gene,
+                        wtf_alpha_bin=wtf_alpha_bin,
+                        wtf_bin_sigma=wtf_bin_sigma,
+                        wtf_unexpressed_mode=wtf_unexpressed_mode,
+                        wtf_prior_real=wtf_prior_real_b,
+                        wtf_strength_gene=wtf_strength_gene,
+                        wtf_strength_bin=wtf_strength_bin,
+                        wtf_strength_value=wtf_strength_value,
                         **generate_kwargs,
                     )
                 )
@@ -504,6 +550,7 @@ def generate_prompt_for_cg(
     add_xyz_noise: bool = False,
     min_max_bounds=None,
     randomly_exclude_columns: Optional[List[str]] = None,
+    xyz_noise_magnitude: int = 2,
 ) -> Tuple[List[int], List[int]]:
     """
     Build prompt IDs by scanning meta_pool for keys that are actual
@@ -559,9 +606,12 @@ def generate_prompt_for_cg(
             col_idx = col_positions[coord]
             val = meta_data.iat[idx, col_idx]
 
-            if add_xyz_noise:
+            if add_xyz_noise and xyz_noise_magnitude > 0:
                 val = int(val)  # ensure it's an integer
-                noise = np.random.choice([-2, -1, 0, 1, 2])  # discrete noise
+                # Uniform discrete noise on [-m, +m]. m = 2 reproduces the historical
+                # hard-coded np.random.choice([-2, -1, 0, 1, 2]).
+                m = int(xyz_noise_magnitude)
+                noise = np.random.choice(np.arange(-m, m + 1))  # discrete noise
                 val += noise
                 min_val, max_val = min_max_bounds
                 val = max(min_val, min(val, max_val))  # clamp

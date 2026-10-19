@@ -702,6 +702,15 @@ def get_parser():
         help="Whether to add noise to x,y,z coordinates during training",
     )
     parser.add_argument(
+        "--xyz-noise-magnitude",
+        dest="xyz_noise_magnitude",
+        type=int,
+        default=2,
+        help="Half-width m of the uniform discrete coordinate noise drawn from "
+             "{-m..+m} when --xyz-noise is set. 2 (default) reproduces the "
+             "historical hard-coded {-2..2}; 0 is equivalent to no noise.",
+    )
+    parser.add_argument(
         "--dummy", action="store_true", help="Whether to use small dummy dataset"
     )
     parser.add_argument(
@@ -1108,6 +1117,7 @@ def train(args):
         n_express_level=model.config.expression_level,
         include_0s=False,
         add_xyz_noise=args.xyz_noise,
+        xyz_noise_magnitude=getattr(args, "xyz_noise_magnitude", 2),
         # exclude_columns = ['supertype','cluster'],
         use_sampling_probs=args.use_sampling_probs,
         sampling_col=args.sampling_col,
