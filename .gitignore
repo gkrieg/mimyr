@@ -22,7 +22,6 @@ TG_base-*.txt
 TG_base_slaf-*.txt
 models/rq3_finetune-*.txt
 models/rq4_finetune-*.txt
-models/slurm/logs/
 
 # Diagnostic / scratch caches
 expr_debug/
@@ -33,3 +32,25 @@ expr_debug/
 # Jupyter checkpoints
 .ipynb_checkpoints/
 **/.ipynb_checkpoints/
+# Large local data, figures, and personal files
+SpatialZ/
+paper_figures/
+Figure_plotting.ipynb
+Mimyr_biorxiv.pdf
+.claude/
+
+# Local experiment, analysis, and job scripts
+experiments/
+analyze_generalization.py
+analyze_pairwise_offline.py
+analyze_wtf_jaccard.py
+check_byte_identical.py
+eval_spatialz_rq1_new.py
+eval_spatialz_rq3distance_new.py
+plot_accuracy_vs_distance.py
+wtf_gt_metrics.py
+final_experimental_results.sh
+run_eval_spatialz_rq1_new.sbatch
+run_main_experiments.sbatch
+models/slurm/
+models/generative_transformer/Testing.ipynb
