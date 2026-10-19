@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=64"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,7 +8,13 @@ version = "0.1.0.dev0"
 description = "Generative modeling of spatial transcriptomics: cell locations, cell types, and gene expression for unseen tissue sections."
 readme = "README.md"
 requires-python = ">=3.10"
-authors = [{ name = "Spencer Krieger", email = "skrieger@andrew.cmu.edu" }]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Spencer Krieger", email = "skrieger@andrew.cmu.edu" },
+    { name = "Ajinkya Deshpande" },
+    { name = "Zhilei Bei" },
+]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Intended Audience :: Science/Research",

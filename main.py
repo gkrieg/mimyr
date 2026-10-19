@@ -592,7 +592,14 @@ def main():
             # flag's argparse default is a real path, so without this coercion
             # --expression_model_size could never take effect (ckp_path was never None).
             ckp_path=args.expression_model_checkpoint or None,
-            meta_info=os.path.join(args.data_dir, args.meta_info),
+            # A relative --meta_info resolves under --data_dir if present there, else
+            # under the metadata dir (the bundled copy by default), as inference does.
+            meta_info=next(
+                (p for p in (os.path.join(args.data_dir, args.meta_info),
+                             os.path.join(args.expression_metadata_dir, args.meta_info))
+                 if os.path.exists(p)),
+                os.path.join(args.data_dir, args.meta_info),
+            ),
             output_dir=args.expression_output_dir,
             # data
             data_mode=args.data_mode,
