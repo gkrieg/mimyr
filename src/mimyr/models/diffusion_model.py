@@ -1,8 +1,5 @@
-import sys
 
-sys.path.append("../..")
-sys.path.append("../generative_transformer")
-from data_loader import SliceDataLoader
+from mimyr.data_loader import SliceDataLoader
 
 import itertools
 import math

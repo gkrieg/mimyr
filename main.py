@@ -6,14 +6,15 @@ import zipfile
 import gdown
 import yaml
 
-from models.combined_model import CombinedModel
-from data_loader import SliceDataLoader
-from data_modes import is_sagittal_mode
-from models.biological_model import KDEModelForGuidance
+from mimyr.models.combined_model import CombinedModel
+from mimyr.data_loader import SliceDataLoader
+from mimyr.data_modes import is_sagittal_mode
+from mimyr.models.biological_model import KDEModelForGuidance
 import torch
 import numpy as np
-from inference import Inference
-from evaluator import Evaluator
+from mimyr.inference import Inference
+from mimyr.evaluator import Evaluator
+from mimyr._resources import METADATA_DIR
 import copy, os, pandas as pd
 import pickle as pkl
 
@@ -303,7 +304,7 @@ def get_args():
     )
     parser.add_argument(
         "--expression_metadata_dir", type=str,
-        default="model_checkpoints/metadata",
+        default=METADATA_DIR,
         help="Directory containing metadata files used by the expression model (edges_x/y/z.pkl, hierarchy.pkl, meta_info .pt)",
     )
     parser.add_argument(
@@ -582,7 +583,7 @@ def main():
             _dist.barrier()
 
         # Train the gene expression module via finetune_mimyr
-        from models.generative_transformer import train_expression_model as _train_expression_model
+        from mimyr.models.generative_transformer import train_expression_model as _train_expression_model
         import argparse as _argparse
 
         expr_args = _argparse.Namespace(

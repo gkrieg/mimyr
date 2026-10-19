@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mimyr"
+version = "0.1.0.dev0"
+description = "Generative modeling of spatial transcriptomics: cell locations, cell types, and gene expression for unseen tissue sections."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Spencer Krieger", email = "skrieger@andrew.cmu.edu" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+    "numpy>=2.2.6",
+    "scipy>=1.15.3",
+    "pandas>=2.3.3",
+    "scikit-learn>=1.7.2",
+    "torch>=2.5.1",
+    "transformers>=4.30.2",
+    "scanpy>=1.11.5",
+    "anndata>=0.10.2",
+    "shapely>=2.1.2",
+    "slafdb>=0.5.2",
+    "tqdm>=4.67.3",
+    "loguru>=0.7.0",
+    "wandb>=0.21.0",
+    "matplotlib>=3.10.9",
+    "seaborn>=0.13.2",
+    "gdown>=5.2.1",
+    "pyyaml>=6.0",
+]
+
+[project.urls]
+Repository = "https://github.com/gkrieg/mimyr"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = false
+
+[tool.setuptools.package-data]
+mimyr = [
+    "models/generative_transformer/metadata/*.pt",
+    "models/generative_transformer/metadata/*.pkl",
+    "models/generative_transformer/reference/GeneSymbolUniform/*.txt",
+]

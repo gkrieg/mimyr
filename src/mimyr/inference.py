@@ -8,13 +8,13 @@ from anndata import AnnData
 from scipy.spatial import cKDTree
 from sklearn.neighbors import NearestNeighbors
 
-from metrics import *
-from analysis import *
+from mimyr.metrics import *
+from mimyr.analysis import *
 
 # after the star imports so neither can shadow these
-from data_modes import is_sagittal_mode, section_axis
+from mimyr.data_modes import is_sagittal_mode, section_axis
 
-from models.generative_transformer.Mimyr import (
+from mimyr.models.generative_transformer.Mimyr import (
     compute_global_bin_edges,
     generate_prompt_for_cg,
     Mimyr,

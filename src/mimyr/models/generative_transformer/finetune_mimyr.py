@@ -28,6 +28,7 @@ from .model.model import MimyrConfig, MimyrModel
 from .utils.hf_tokenizer import MimyrTokenizer
 from .data_util import get_generation_dataloader, harmonize_dataset, summarize_sample_ddp
 from .Mimyr import tokens_and_vals_to_expression_row
+from mimyr._resources import METADATA_DIR
 
 from scipy.stats import pearsonr
 import numpy as np
@@ -723,7 +724,7 @@ def get_parser():
     parser.add_argument(
         "--metadata-dir",
         type=str,
-        default="model_checkpoints/metadata",
+        default=METADATA_DIR,
         help="Directory containing metadata files (edges_x/y/z.pkl, meta_info .pt) for harmonization",
     )
     parser.add_argument(
@@ -1019,7 +1020,7 @@ def train(args):
 
     # 4) Load train/val AnnData from data_loader (or cache if available)
     import scanpy as _sc
-    from data_loader import SliceDataLoader
+    from mimyr.data_loader import SliceDataLoader
 
     train_cache = _find_cache("train")
     val_cache = _find_cache("val")
@@ -1028,7 +1029,7 @@ def train(args):
     if cache_exists:
         if rank == 0:
             print(f"Loading preprocessed adata from cache in {args.output_dir} ({os.path.basename(train_cache)}, {os.path.basename(val_cache)})")
-        from data_loader import _read_slice
+        from mimyr.data_loader import _read_slice
         adata_train = _read_slice(train_cache)
         adata_val = _read_slice(val_cache)
         adata_test = None

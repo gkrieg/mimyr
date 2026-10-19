@@ -44,10 +44,10 @@ If you have an NVIDIA GPU and want to use CUDA for acceleration, install PyTorch
 pip install torch
 ```
 
-#### Install Remaining Dependencies
-Install the remaining required packages:
+#### Install MIMYR
+From the repository root, install the `mimyr` package and its dependencies:
 ```bash
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ---
@@ -172,36 +172,33 @@ The pipeline generates:
   - `results.json`: Evaluation metrics
   - `pred.pkl`: Prediction outputs
 
----
-
-## Project Structure
+--## Project Structure
 ```
 MIMYR/
+├── pyproject.toml               # Package definition (pip install -e .)
 ├── config.yaml                  # Default config values; override with --config
-├── configs/                     # Per-experiment config files for SLURM runs
+├── configs/                     # Per-experiment config files
 ├── gene_overlap.txt             # Shared gene set for rq1/rq3 evaluation
-├── requirements.txt             # Python package dependencies
 ├── main.py                      # Single entry point (inference and train modes)
-├── data_loader.py               # SliceDataLoader: data loading and preprocessing
-├── inference.py                 # Inference pipeline
-├── evaluator.py                 # Evaluation metrics
-├── metrics.py                   # Metric implementations
-├── gene_exp_model.py            # Gene expression tokenization utilities
-├── models/
-│   ├── diffusion_model.py            # DDPM location model
-│   ├── celltype_model.py             # Cell type classifier
-│   ├── biological_model.py           # KDE-based spatial prior
-│   ├── combined_model.py             # Wraps location + celltype models
-│   ├── __init__.py                   # Makes models/ a package
-│   ├── generative_transformer/       # Transformer-based expression model
-│   │   ├── Mimyr.py                  # MimyrModel architecture
-│   │   ├── finetune_mimyr.py         # Expression model training logic (DDP-aware)
-│   │   ├── data_util.py              # Data harmonization utilities
-│   │   ├── model/                    # Core transformer implementation
-│   │   ├── reference/                # Reference gene symbol data
-│   │   ├── utils/                    # Tokenizer and other utilities
-│   │   └── __init__.py               # Exports train_expression_model, get_expression_parser
-│   └── slurm/                        # SLURM sbatch scripts for training runs
+├── src/mimyr/                   # The installable `mimyr` package
+│   ├── data_loader.py                # SliceDataLoader: data loading and preprocessing
+│   ├── inference.py                  # Inference pipeline
+│   ├── evaluator.py                  # Evaluation metrics
+│   ├── metrics.py                    # Metric implementations
+│   ├── gene_exp_model.py             # Gene expression tokenization utilities
+│   └── models/
+│       ├── diffusion_model.py        # DDPM location model
+│       ├── celltype_model.py         # Cell type classifier
+│       ├── biological_model.py       # KDE-based spatial prior
+│       ├── combined_model.py         # Wraps location + celltype models
+│       └── generative_transformer/   # Transformer-based expression model
+│           ├── Mimyr.py              # MimyrModel architecture
+│           ├── finetune_mimyr.py     # Expression model training logic (DDP-aware)
+│           ├── data_util.py          # Data harmonization utilities
+│           ├── metadata/             # Bundled gene/cell-type metadata
+│           ├── model/                # Core transformer implementation
+│           ├── reference/            # Reference gene symbol data
+│           └── utils/                # Tokenizer and other utilities
 └── model_checkpoints/           # Pretrained model weights
-```
+``````
 

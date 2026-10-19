@@ -5,8 +5,9 @@ import scanpy as sc
 import pandas as pd
 import tqdm
 import numpy as np
-from gene_exp_model import GeneExpModel
-from models.generative_transformer.data_util import harmonize_dataset
+from mimyr._resources import METADATA_DIR
+from mimyr.gene_exp_model import GeneExpModel
+from mimyr.models.generative_transformer.data_util import harmonize_dataset
 import torch
 
 from loguru import logger as _loguru_logger
@@ -103,7 +104,7 @@ class SliceDataLoader:
         mode="intra",
         label="subclass",
         cfg=None,
-        metadata_dir="model_checkpoints/metadata",
+        metadata_dir=METADATA_DIR,
         omit_x=False,
     ):
         """
@@ -1044,7 +1045,7 @@ class SliceDataLoader:
             # Tokenize the Zhuang-1 pool first so self.gene_exp_model ends up holding
             # the Zhuang-3 model, matching plain rq4 (inference.py reads it for
             # get_label_from_token). Cross-dataset token agreement relies on
-            # GeneExpModel loading the global data/id_to_subclass.pkl -- its except
+            # GeneExpModel loading the bundled id_to_subclass.pkl -- its except
             # branch silently re-enumerates, which would make the two datasets'
             # tokens disagree, so assert the maps match.
             reference_slices = self._align_and_tokenize_slices(
@@ -1057,7 +1058,7 @@ class SliceDataLoader:
             if self.gene_exp_model.subclass_to_id != ref_token_map:
                 raise RuntimeError(
                     "rq4_noref: cell-type token maps diverged between Zhuang-1 and "
-                    "Zhuang-3 -- data/id_to_subclass.pkl failed to load, so tokens "
+                    "Zhuang-3 -- the bundled id_to_subclass.pkl failed to load, so tokens "
                     "were re-enumerated per dataset and the cross-brain lookup would "
                     "match the wrong cell types."
                 )

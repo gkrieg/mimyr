@@ -1,8 +1,9 @@
 import os
 import torch
 
-from data_modes import is_sagittal_mode
-from metrics import (
+from mimyr._resources import METADATA_DIR
+from mimyr.data_modes import is_sagittal_mode
+from mimyr.metrics import (
     soft_accuracy,
     soft_correlation,
     soft_f1,
@@ -19,7 +20,7 @@ class Evaluator:
     def __init__(
         self,
         config,
-        metadata_dir="model_checkpoints/metadata",
+        metadata_dir=METADATA_DIR,
         gene_set_file=None,
     ):
         self.config = config
