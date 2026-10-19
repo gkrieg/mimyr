@@ -36,7 +36,8 @@ dependencies = [
     "wandb>=0.21.0",
     "matplotlib>=3.10.9",
     "seaborn>=0.13.2",
-    "gdown>=5.2.1",
+    "huggingface_hub>=0.23",
+    "filelock",
     "pyyaml>=6.0",
 ]
 

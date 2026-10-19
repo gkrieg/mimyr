@@ -222,6 +222,25 @@ class SliceDataLoader:
             s.obs['species'] = 'mouse'
         return slices1
 
+    DEMO_SECTIONS = ["sec_13.h5ad", "sec_14.h5ad", "sec_15.h5ad"]  # reference, test, reference
+
+    def load_demo_slices(self):
+        """The demo dataset: rq1 test section sec_14 and its two neighbours, each
+        subsampled to 5% of its cells (see demo_data/make_demo_data.py)."""
+        input_dir = self.cfg.get("demo_data_dir") or "demo_data"
+        missing = [f for f in self.DEMO_SECTIONS if not os.path.exists(os.path.join(input_dir, f))]
+        if missing:
+            raise FileNotFoundError(
+                f"data mode 'demo' needs {', '.join(missing)} in '{input_dir}'. Run main.py from "
+                "the repository root or point --demo_data_dir at the demo_data/ folder."
+            )
+        slices = [_read_slice(os.path.join(input_dir, f)) for f in self.DEMO_SECTIONS]
+        for s in slices:  # same metadata load_intra_slices sets for rq1
+            s.obs["technology"] = "M550"
+            s.obs["disease_state"] = "healthy"
+            s.obs["species"] = "mouse"
+        return slices
+
     def _compute_rq1_train_indices_by_z_ccf(self, test_slices, rq1_eligible_indices):
         """For each test slice, find the eligible rq1 slice with the closest mean z_ccf.
 
@@ -288,7 +307,8 @@ class SliceDataLoader:
     def load_zhuangn_slices(self, n=2, fast_select=None, remove_edges=True):
         print("Fast selecting", fast_select)
 
-        zhuang_base = self.cfg.get("zhuang_data_dir")
+        # Defaults to data_dir, where the downloaded Zhuang-ABCA-* folders are extracted.
+        zhuang_base = self.cfg.get("zhuang_data_dir") or self.cfg.get("data_dir")
         if not zhuang_base:
             print(self.cfg)
             raise ValueError(
@@ -341,7 +361,9 @@ class SliceDataLoader:
         return slices2
 
     def load_diseased_slices(self):
-        input_dir = self.cfg.get("diseased_data_dir")
+        input_dir = self.cfg.get("diseased_data_dir") or (
+            self.cfg.get("data_dir") and os.path.join(self.cfg["data_dir"], "cleaned_versions")
+        )
         if not input_dir:
             raise ValueError(
                 "data mode 'rq5' requires --diseased_data_dir (or diseased_data_dir in config.yaml) "
@@ -600,6 +622,24 @@ class SliceDataLoader:
             train_slices, val_slices, test_slices, reference_slices = (
                 self._harmonize_slice_lists(
                     train_slices, val_slices, test_slices, reference_slices
+                )
+            )
+            self._set_slice_attributes(
+                train_slices, val_slices, test_slices, reference_slices
+            )
+
+        elif self.mode == "demo":
+            # One rq1 test section between its two reference sections, processed
+            # exactly like rq1. The references double as training data and the
+            # test section as validation, so the demo also works with train mode.
+            slices_tokenized = self._align_and_tokenize_slices(self.load_demo_slices())
+            for sid, slice in enumerate(slices_tokenized):
+                slice.obs["slice_id"] = sid
+            reference_slices = [slices_tokenized[0], slices_tokenized[2]]
+            test_slices = [slices_tokenized[1]]
+            train_slices, val_slices, test_slices, reference_slices = (
+                self._harmonize_slice_lists(
+                    list(reference_slices), list(test_slices), test_slices, reference_slices
                 )
             )
             self._set_slice_attributes(

@@ -1,9 +1,7 @@
 import argparse
 from dataclasses import dataclass
 from datetime import datetime
-import zipfile
 
-import gdown
 import yaml
 
 from mimyr.models.combined_model import CombinedModel
@@ -15,6 +13,7 @@ import numpy as np
 from mimyr.inference import Inference
 from mimyr.evaluator import Evaluator
 from mimyr._resources import METADATA_DIR
+from mimyr import pretrained
 import copy, os, pandas as pd
 import pickle as pkl
 
@@ -78,7 +77,12 @@ def get_args():
 
 
     parser.add_argument(
-        "--data_mode", type=str, default="rq1", help="Mode for SliceDataLoader"
+        "--data_mode", type=str, default="demo",
+        help="Dataset and split to use (default: demo, a small bundled dataset; see README)",
+    )
+    parser.add_argument(
+        "--demo_data_dir", type=str, default="demo_data",
+        help="Directory with the demo sections (used when --data_mode demo)",
     )
     parser.add_argument(
         "--omit_x", action="store_true", help="Omit x_ccf coordinate from aligned_spatial"
@@ -90,29 +94,37 @@ def get_args():
         help="Label type for SliceDataLoader",
     )
     parser.add_argument(
+        "--pretrained",
+        type=str,
+        default=None,
+        choices=list(pretrained.PRESETS),
+        help=f"Pretrained model to use for any checkpoint not given explicitly, together "
+             f"with the inference settings used for it in the paper (default: {pretrained.DEFAULT_PRESET})",
+    )
+    parser.add_argument(
         "--location_model_checkpoint",
         type=str,
-        default="model_checkpoints/smoothtune_conditional_ddpm_2d_checkpoint_400.pt",
-        help="Path to trained location checkpoint",
+        default=None,
+        help="Path to a location checkpoint (default: the --pretrained model's)",
     )
     parser.add_argument(
         "--cluster_model_checkpoint",
-        type=str,  
-        default="model_checkpoints/best_model_rq1.pt",
-        help="Path to trained CelltypeModel checkpoint",
+        type=str,
+        default=None,
+        help="Path to a cell-type checkpoint (default: the --pretrained model's)",
     )
     parser.add_argument(
         "--expression_model_checkpoint",
-        type=str,  ### CHANGE
-        default="model_checkpoints/TG-base4_epoch4_model.pt",
-        help="Path to trained expression checkpoint",
+        type=str,
+        default=None,
+        help='Path to an expression checkpoint (default: the --pretrained model\'s; "" trains from scratch)',
     )
 
     parser.add_argument(
         "--location_inference_type",
         type=str,
-        default="skip",
-        help="Type of location inference",
+        default="model",
+        help="Location stage: model, closest_slice, skip (use ground truth), or end (stop)",
     )
     parser.add_argument(
         "--kde_bandwidth", type=float, default=0.01, help="Bandwidth for KDE"
@@ -122,13 +134,13 @@ def get_args():
         "--cluster_inference_type",
         type=str,
         default="model",
-        help="How to infer subclass",
+        help="Cell-type stage: model, majority_baseline, skip (use ground truth), or end (stop)",
     )
     parser.add_argument(
         "--expression_inference_type",
         type=str,
-        default="end",
-        help="How to infer gene expression",
+        default="model",
+        help="Expression stage: model, lookup, averaging, skip (use ground truth), or end (stop)",
     )
 
     # training hyperparams
@@ -164,15 +176,13 @@ def get_args():
     parser.add_argument(
         "--metrics",
         type=lambda s: s.split(","),
-        help="Comma-separated list of metrics to compute (soft_accuracy,soft_correlation,neighborhood_enrichment,soft_precision)",
-        default=[
-            "soft_accuracy"
-        ],  # ,"soft_accuracy", "soft_correlation", "neighborhood_enrichment", "soft_precision"],
+        help="Comma-separated list of metrics to compute (e.g. soft_accuracy,soft_spearman_correlation,soft_f1; see README for all)",
+        default=["soft_accuracy", "soft_spearman_correlation", "soft_f1"],
     )
     parser.add_argument(
         "--metric_sampling",
         type=int,
-        default=1,
+        default=100,
         help="Percentage of samples to use for metric computation",
     )
     parser.add_argument(
@@ -308,8 +318,12 @@ def get_args():
         help="Directory containing metadata files used by the expression model (edges_x/y/z.pkl, hierarchy.pkl, meta_info .pt)",
     )
     parser.add_argument(
-        "--expression_from_finetuned", action="store_true",
-        help="Indicate that the expression checkpoint is already finetuned (affects weight loading)",
+        "--expression_from_finetuned", action="store_true", default=True,
+        help="Load the expression checkpoint's weights and resume its epoch count (the default)",
+    )
+    parser.add_argument(
+        "--expression_random_init", dest="expression_from_finetuned", action="store_false",
+        help="Use only the expression checkpoint's architecture and start training from random weights",
     )
     parser.add_argument(
         "--expression_model_size", type=str, default=None,
@@ -469,20 +483,34 @@ def get_args():
 
     # Two-pass: extract --config first, load YAML, set as new defaults, then re-parse
     # so that explicit CLI flags still take precedence over the config file.
+    # Precedence, lowest to highest: argparse defaults < the pretrained model's
+    # settings < the config file < explicit CLI flags.
     pre_args, _ = parser.parse_known_args()
+    file_cfg = {}
     if pre_args.config is not None:
         with open(pre_args.config) as f:
             file_cfg = yaml.safe_load(f) or {}
         # Skip null values so they don't clobber argparse defaults
         file_cfg = {k: v for k, v in file_cfg.items() if v is not None}
-        parser.set_defaults(**file_cfg)
+    preset = pre_args.pretrained or file_cfg.get("pretrained") or pretrained.DEFAULT_PRESET
+    parser.set_defaults(**pretrained.PRESETS[preset]["settings"])
+    parser.set_defaults(**file_cfg)
+    parser.set_defaults(pretrained=preset)
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    # Any checkpoint not given explicitly comes from the pretrained model on the Hub.
+    for role, dest in (("location", "location_model_checkpoint"),
+                       ("celltype", "cluster_model_checkpoint"),
+                       ("expression", "expression_model_checkpoint")):
+        if getattr(args, dest) is None:
+            setattr(args, dest, pretrained.checkpoint(args.pretrained, role))
+    return args
 
 
 # ----------------- util -----------------
 def write_row(row, path):
     if not os.path.isfile(path):
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         pd.DataFrame([row]).to_csv(path, index=False)
         return
 
@@ -532,15 +560,10 @@ def main():
     if not os.path.exists(cfg["artifact_dir"]):
         os.makedirs(cfg["artifact_dir"], exist_ok=True)
 
-    if not os.path.exists(cfg["data_dir"]):
-        gdown.download(id="1iJX3z9S_biGCdpc-uQWwJyFImhv2mdU8", output="data.zip")
-        with zipfile.ZipFile("data.zip", 'r') as zip_ref:
-            zip_ref.extractall(".")
-    
-    if not os.path.exists("model_checkpoints"):
-        gdown.download(id="1OSh5JfXg2OXVfTIyGR33PkvQYGNqFXLD", output="model_checkpoints.zip")
-        with zipfile.ZipFile("model_checkpoints.zip", 'r') as zip_ref:
-            zip_ref.extractall(".")
+    # Download the benchmark data this mode reads, if it is not already in data_dir.
+    pretrained.ensure_data(
+        args.data_mode, args.data_dir, use_rq1_train=getattr(args, "use_rq1_train", False)
+    )
 
     print(cfg)
     slice_data_loader = SliceDataLoader(
@@ -592,6 +615,7 @@ def main():
             # flag's argparse default is a real path, so without this coercion
             # --expression_model_size could never take effect (ckp_path was never None).
             ckp_path=args.expression_model_checkpoint or None,
+            demo_data_dir=args.demo_data_dir,
             # A relative --meta_info resolves under --data_dir if present there, else
             # under the metadata dir (the bundled copy by default), as inference does.
             meta_info=next(
@@ -626,7 +650,8 @@ def main():
             log_per_steps=args.expression_log_per_steps,
             bin_edges_file=None,
             # model init
-            from_finetuned=args.expression_from_finetuned,
+            # There are no weights to load when training from scratch (empty checkpoint).
+            from_finetuned=bool(args.expression_from_finetuned and args.expression_model_checkpoint),
             model_size=args.expression_model_size,
             overwrite_vocab_size=None,
             new_expression_size=args.expression_new_expression_size,

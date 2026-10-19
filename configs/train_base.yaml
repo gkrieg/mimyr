@@ -36,3 +36,8 @@ expression_save_frequency: 1
 expression_xyz_noise: true
 expression_epoch_samples: 1000000
 expression_log_per_steps: 10
+
+# Pinned when weight loading became the default: this run starts from random
+# weights with the default checkpoint's architecture, as it always has.
+expression_from_finetuned: false
+expression_model_checkpoint: model_checkpoints/TG-base4_epoch4_model.pt

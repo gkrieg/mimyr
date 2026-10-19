@@ -45,6 +45,18 @@ cluster_model_checkpoint: model_checkpoints/best_model_rq1.pt
 expression_model_checkpoint: model_checkpoints/TG-base4_epoch4_model.pt
 
 # ---------------------------------------------------------------------------
+# Inference settings
+# ---------------------------------------------------------------------------
+# The default pretrained model (--pretrained merscope) turns on reference guidance
+# at strength 75 and metric_filter_by_gt, matching paper Fig. 2. The lab's run
+# scripts pass these explicitly when they want them, so keep them off here.
+expression_weak_teacher_forcing: false
+wtf_strength_gene: 0.0
+wtf_strength_bin: 0.0
+wtf_strength_value: 0.0
+metric_filter_by_gt: false
+
+# ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 
