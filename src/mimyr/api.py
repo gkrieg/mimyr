@@ -443,7 +443,7 @@ class Mimyr:
     # ------------------------------------------------------------- training
     def train(self, train, val, output_dir, *, components=("celltype", "expression"),
               epochs=10, batch_size=8, lr=5e-5, celltype_epochs=1000, save_every=None,
-              **expression_options):
+              location_epochs=400, location_lr=2e-4, **expression_options):
         """Fine-tune the model on your sections, starting from its current weights.
 
         train, val: sections to train and validate on (validation sections set
@@ -451,11 +451,13 @@ class Mimyr:
             for the expression model).
         output_dir: where checkpoints go; the model then points at the new ones,
             so call `save` afterwards to keep it as a folder.
-        components: "celltype" and/or "expression". The location model is not
-            trainable here: the pretrained one models the mouse brain in CCF
-            space and serves any CCF-registered mouse data.
+        components: any of "location", "celltype" and "expression". The
+            pretrained location model already covers the whole mouse brain in CCF
+            space, so "location" is opt-in; it trains coronal models only.
         epochs, batch_size, lr: for the expression model; celltype_epochs caps
-            the classifier's training (it stops early on validation).
+            the classifier's training (it stops early on validation);
+            location_epochs and location_lr are for the location model, which
+            has no validation step and keeps a checkpoint every 20 epochs.
         save_every: also keep the expression checkpoint every this many epochs.
         expression_options: other expression-trainer settings, by their
             argument names in finetune_mimyr (e.g. xyz_noise=True, lambda_val=1.0).
@@ -467,12 +469,13 @@ class Mimyr:
         GPUs. Weights & Biases logging is off unless WANDB_MODE is set.
         """
         components = (components,) if isinstance(components, str) else tuple(components)
-        bad = set(components) - {"celltype", "expression"}
-        if "location" in bad:
-            raise ValueError("the location model cannot be trained through the API; "
-                             "the pretrained one covers CCF-registered mouse brains")
+        bad = set(components) - {"location", "celltype", "expression"}
         if bad:
-            raise ValueError(f"unknown components {sorted(bad)}; choose celltype and/or expression")
+            raise ValueError(f"unknown components {sorted(bad)}; "
+                             "choose from location, celltype and expression")
+        if "location" in components and self.orientation != "coronal":
+            raise NotImplementedError(f"location training supports coronal models only, "
+                                      f"and this one is {self.orientation}")
         import torch.distributed as dist
 
         distributed = dist.is_available() and int(os.environ.get("WORLD_SIZE", 1)) > 1
@@ -485,6 +488,16 @@ class Mimyr:
         os.makedirs(output_dir, exist_ok=True)
         train = _as_list(prepare(train, omit_x=self.omit_x))
         val = _as_list(prepare(val, omit_x=self.omit_x))
+
+        if "location" in components:
+            path = os.path.join(output_dir, "location.pt")
+            if rank == 0:
+                self._train_location(ad.concat(train), output_dir, path,
+                                     epochs=location_epochs, lr=location_lr)
+            if distributed:
+                dist.barrier()
+            self.location_checkpoint = path
+            self._models = None
 
         if "celltype" in components:
             path = os.path.join(output_dir, "celltype.pt")
@@ -506,6 +519,40 @@ class Mimyr:
                 **expression_options,
             )
         return self
+
+    def _train_location(self, sections, output_dir, path, *, epochs, lr):
+        from mimyr.models.combined_model import TrainConfig
+        from mimyr.models.diffusion_model import DDPMTrainer
+
+        # aligned_spatial is [z_ccf, y_ccf, x_ccf]. The model learns the coronal
+        # plane (z, y) conditioned on [4, 5, x_ccf, 0, 0, 1], which is how
+        # infer_location conditions it for a coronal section.
+        xyz = np.asarray(sections.obsm["aligned_spatial"], dtype=np.float32)
+        cond = np.zeros((len(xyz), 6), dtype=np.float32)
+        cond[:, 0], cond[:, 1], cond[:, 2], cond[:, 5] = 4.0, 5.0, xyz[:, 2], 1.0
+
+        # Normalization: DDPMTrainer ignores these sections' statistics and
+        # normalizes coordinates and conditions with constants hardcoded from the
+        # whole-mouse-brain CCF training set. Inference un-normalizes with the
+        # same constants (CombinedModel reads only the weights, not the stats
+        # saved below), so train and sample agree. That suits CCF-registered
+        # mouse data in mm; data in another frame or scale would need new
+        # constants, changed in DDPMTrainer for both training and sampling.
+        ckpt_dir = os.path.join(output_dir, "location")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        cfg = TrainConfig(epochs=epochs, batch_size=4096, lr=lr, ckpt_dir=ckpt_dir,
+                          ckpt_prefix="ddpm_2d_checkpoint", viz=False)
+        trainer = DDPMTrainer(xyz, cond, cfg)
+        if self.location_checkpoint is not None:  # fine-tune from the current weights
+            current = self._combined().trainer
+            trainer.model.load_state_dict(current.model.state_dict())
+            trainer.ema.shadow = {k: v.detach().clone() for k, v in current.ema.shadow.items()}
+        trainer.train()
+        torch.save({
+            "model": trainer.model.state_dict(), "ema": trainer.ema.shadow, "cfg": cfg,
+            "coord_mean": trainer.mean, "coord_std": trainer.std,
+            "cond_mean": trainer.cond_mean, "cond_std": trainer.cond_std,
+        }, path)
 
     def _train_expression(self, train, val, out, rank, distributed, *, epochs, batch_size, lr,
                           save_every, **options):

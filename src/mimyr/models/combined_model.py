@@ -31,6 +31,8 @@ class TrainConfig:
     # checkpoint basename prefix (epoch appended). Override for a retrain so it
     # doesn't clobber the production smoothtune_..._400.pt checkpoint.
     ckpt_prefix: str = "smoothtune2_conditional_ddpm_2d_checkpoint"
+    # folder train() saves checkpoints in (relative to the working directory).
+    ckpt_dir: str = "model_checkpoints"
     # whether train() renders the in-loop 200k-point sample figures (headless: off).
     viz: bool = True
 

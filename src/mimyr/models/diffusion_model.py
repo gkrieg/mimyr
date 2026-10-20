@@ -52,6 +52,8 @@ class TrainConfig:
     # checkpoint basename prefix (epoch is appended). Override to avoid clobbering
     # other DDPM checkpoints, e.g. a Zhuang-1 location retrain.
     ckpt_prefix: str = "smoothtune2_conditional_ddpm_2d_checkpoint"
+    # folder train() saves checkpoints in (relative to the working directory).
+    ckpt_dir: str = "model_checkpoints"
     # whether train() renders the in-loop 200k-point sample figures. Off = much
     # faster headless training (the figures were never saved to disk anyway).
     viz: bool = True
@@ -403,7 +405,8 @@ class DDPMTrainer:
             print(f"Epoch {epoch:03d} | loss {avg_loss:.6f}")
 
             if epoch % 5 == 0:
-                ckpt_name = f"model_checkpoints/{self.cfg.ckpt_prefix}_{epoch}.pt"
+                ckpt_dir = getattr(self.cfg, "ckpt_dir", "model_checkpoints")
+                ckpt_name = f"{ckpt_dir}/{self.cfg.ckpt_prefix}_{epoch}.pt"
                 if epoch % 20 == 0:
                     torch.save(
                         {

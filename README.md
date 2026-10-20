@@ -127,8 +127,11 @@ model = mimyr.Mimyr.from_pretrained("my_model/")       # later
 
 `train` fine-tunes the cell-type classifier and the expression model, starting
 from the current weights; pass `components=("expression",)` to train just one.
-The location model can't be trained through the API. The pretrained one models the
-whole mouse brain in CCF space, so it works for any CCF-registered mouse data.
+The pretrained location model covers the whole mouse brain in CCF space, so it
+works for any CCF-registered mouse data. To fine-tune it on your sections as well,
+add `"location"` to `components` (`location_epochs`, default 400). Location
+training supports coronal models only. It normalizes coordinates with fixed
+constants for the CCF mouse brain, so the data must be in CCF mm.
 
 The models use a fixed vocabulary: the 2,000-gene panel and the 5,274 Allen Brain
 Cell Atlas clusters. Data must use these gene symbols and cluster names; other
@@ -349,7 +352,8 @@ classifier on the `.h5ad`/`.slaf` files in `--training_slice_directory` and
 `--val_slice_directory` (default `data/cleaned_versions`). These files also need an
 `obs["token"]` column. The best model is saved to `./best_model.pt`.
 
-`main.py` does not train the location model. `train_location_zhuang1.py` and
+`main.py` does not train the location model (the Python API does; see above).
+`train_location_zhuang1.py` and
 `train_celltype_zhuang1.py` retrain the location and cell-type models on
 Zhuang-ABCA-1; they currently contain cluster-specific data paths.
 
