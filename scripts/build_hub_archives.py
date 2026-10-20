@@ -5,11 +5,12 @@ Maintainer script. Each archive holds one dataset's files with paths relative to
 
     rq1-merscope.zip    subclass_z1_d338_0_rotated/sec_*.h5ad
     Zhuang-ABCA-<n>.zip Zhuang-ABCA-<n>/*  and  ccf-ABCA-<n>.csv
-    Trem2-5xFAD.zip     cleaned_versions/*
 
 The file list is the one previously distributed as data.zip on Google Drive
 (`--members`, a JSON of {relative path: size}); every file is checked against
-that size before it is added, so the archives are byte-identical to it.
+that size before it is added, so the archives are byte-identical to it. The
+Trem2 / 5xFAD sections in it (cleaned_versions/, data mode rq5) are not
+distributed and are skipped.
 
 Usage:
     python scripts/build_hub_archives.py --members data_members.json --out_dir staging/data
@@ -26,8 +27,8 @@ SOURCES = {
     "subclass_z1_d338_0_rotated": "/work/magroup/skrieger/tissue_generator/quantized_slices",
     "Zhuang-ABCA-": "/work/magroup/skrieger/MERFISH_BICCN/processed_data",
     "ccf-ABCA-": "/work/magroup/skrieger/tissue_generator/quantized_slices",
-    "cleaned_versions": "/work/magroup/skrieger/tissue_generator/CCF_registration/ccf_aligned_Trem2_5xFAD",
 }
+NOT_DISTRIBUTED = ("cleaned_versions",)
 
 
 def archive_for(member):
@@ -38,8 +39,6 @@ def archive_for(member):
         return f"{top}.zip"
     if top.startswith("ccf-ABCA-"):
         return f"Zhuang-ABCA-{top[len('ccf-ABCA-'):-len('.csv')]}.zip"
-    if top == "cleaned_versions":
-        return "Trem2-5xFAD.zip"
     raise ValueError(f"no archive for {member}")
 
 
@@ -73,6 +72,8 @@ def main():
     members = json.load(open(args.members))
     groups = {}
     for member, size in members.items():
+        if member.split("/")[0] in NOT_DISTRIBUTED:
+            continue
         groups.setdefault(archive_for(member), {})[member] = size
     os.makedirs(args.out_dir, exist_ok=True)
     with ProcessPoolExecutor(max_workers=len(groups)) as pool:

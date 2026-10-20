@@ -87,15 +87,6 @@ PRESETS = {
             "metric_filter_by_gt": True,
         },
     },
-    "trem2-5xfad": {
-        "description": "Model fine-tuned on Trem2 / 5xFAD Alzheimer's-model sections (paper Fig. 5; data_mode rq5)",
-        "checkpoints": {
-            "location": _LOC_MERSCOPE,
-            "celltype": "celltype/best_model_rq5.pt",
-            "expression": "expression/trem2-5xfad_epoch60_model.pt",
-        },
-        "settings": {},
-    },
 }
 
 DEFAULT_PRESET = "merscope"
@@ -108,7 +99,6 @@ DATA_ARCHIVES = {
     "Zhuang-ABCA-2.zip": "Zhuang-ABCA-2",
     "Zhuang-ABCA-3.zip": "Zhuang-ABCA-3",
     "Zhuang-ABCA-4.zip": "Zhuang-ABCA-4",
-    "Trem2-5xFAD.zip": "cleaned_versions",
 }
 
 
@@ -141,8 +131,6 @@ def archives_for(data_mode, use_rq1_train=False):
         return []
     if mode == "rq1":
         return ["rq1-merscope.zip"]
-    if mode == "rq5":
-        return ["Trem2-5xFAD.zip"]
     if mode == "base_zhuang1":
         return ["Zhuang-ABCA-1.zip"]
     if mode in ("rq2", "rq2_v2"):

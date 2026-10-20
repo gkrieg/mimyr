@@ -20,11 +20,6 @@ from mimyr import pretrained
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 
-# The Trem2 / 5xFAD model and data (paper Fig. 5) are held back until their
-# release is cleared with the lab that generated the sections; see UNPUBLISHED.
-UNPUBLISHED_PRESETS = {"trem2-5xfad"}
-UNPUBLISHED_ARCHIVES = {"Trem2-5xFAD.zip"}
-
 # Hub path -> source checkpoint on the lab cluster (the files behind the paper's figures).
 CHECKPOINT_SOURCES = {
     "location/smoothtune_conditional_ddpm_2d_checkpoint_400.pt":
@@ -45,8 +40,7 @@ CHECKPOINT_SOURCES = {
 
 
 def stage_models(staging):
-    referenced = {p for name, preset in pretrained.PRESETS.items() if name not in UNPUBLISHED_PRESETS
-                  for p in preset["checkpoints"].values()}
+    referenced = {p for preset in pretrained.PRESETS.values() for p in preset["checkpoints"].values()}
     missing = referenced - set(CHECKPOINT_SOURCES)
     if missing:
         raise RuntimeError(f"presets reference checkpoints with no source: {sorted(missing)}")
@@ -68,8 +62,8 @@ def main():
     parser.add_argument("what", choices=["models", "data"])
     parser.add_argument("--archives_dir", help="Folder with the archives from build_hub_archives.py")
     parser.add_argument("--archives", nargs="+",
-                        default=[a for a in pretrained.DATA_ARCHIVES if a not in UNPUBLISHED_ARCHIVES],
-                        help="Which data archives to upload (default: all published ones)")
+                        default=list(pretrained.DATA_ARCHIVES),
+                        help="Which data archives to upload (default: all)")
     parser.add_argument("--public", action="store_true", help="Create the repo public (default: private)")
     args = parser.parse_args()
 

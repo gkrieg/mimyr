@@ -173,7 +173,7 @@ download.
 | `rq1` | coronal sections from one brain, fixed held-out sections | `--data_dir/subclass_z1_d338_0_rotated/` |
 | `rq3`, `rq3_v2`, `rq3_v2_d1` … `rq3_v2_d4` | Zhuang-ABCA-2 (coronal); the `_d*` modes vary the distance to the reference sections | `--zhuang_data_dir/Zhuang-ABCA-2/`, `--data_dir/ccf-ABCA-2.csv` |
 | `rq4`, `rq4_rq3`, `rq4_noref` | Zhuang-ABCA-3 (sagittal); `rq4_noref` uses all of Zhuang-ABCA-1 as the reference pool | `--zhuang_data_dir/Zhuang-ABCA-3/` (and `-1`, `-2`), `--data_dir/ccf-ABCA-*.csv` |
-| `rq5` | diseased (Trem2 / 5xFAD) sections | `--diseased_data_dir` |
+| `rq5` | diseased (Trem2 / 5xFAD) sections; not distributed, so supply your own | `--diseased_data_dir` |
 | `base_zhuang1` | Zhuang-ABCA-1, for training the base models | `--zhuang_data_dir/Zhuang-ABCA-1/` |
 
 ### Main options
