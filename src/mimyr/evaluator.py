@@ -6,6 +6,7 @@ from mimyr.data_modes import is_sagittal_mode
 from mimyr.metrics import (
     soft_accuracy,
     soft_correlation,
+    soft_correlation_top_100,
     soft_f1,
     delauney_colocalization,
     gridized_l1_distance,
@@ -13,6 +14,20 @@ from mimyr.metrics import (
     celltype_abundance_metrics,
     local_composition_entropy,
     composition_pairwise,
+)
+
+# Names accepted in config["metrics"].
+METRICS = (
+    "soft_accuracy",
+    "soft_spearman_correlation",
+    "soft_correlation_top_100",
+    "soft_f1",
+    "gridized_l1_distance",
+    "gridized_kl_divergence",
+    "celltype_abundance",
+    "composition_entropy",
+    "composition_pairwise",
+    "delauney_colocalization",
 )
 
 
@@ -136,19 +151,6 @@ class Evaluator:
             print("delauney colocalization :", dc)
             results[f"delauney_colocalization"] = dc
 
-        if "neighborhood_enrichment" in self.config["metrics"]:
-            for k in [5, 10, 20]:
-                ne = neighborhood_enrichment(
-                    target_adata.obs["token"].to_numpy().tolist(),
-                    target_adata.obsm["aligned_spatial"],
-                    predicted_adata.obs["token"].tolist(),
-                    predicted_adata.obsm["spatial"],
-                    k=k,
-                )
-                print("neighborhood enrichment @", k, ":", ne)
-                results[f"neighborhood_enrichment@{k}"] = ne
-
-
         if "soft_spearman_correlation" in self.config["metrics"]:
 
             for r in [0.03, 0.04, 0.05, 0.09, 0.12, 0.15]:
@@ -177,10 +179,9 @@ class Evaluator:
                     radius=r,
                     sample=sample,
                     corr_type="spearman",
-                    gene_set=self.gene_set,
                 )
-                print("soft spearman correlation radius @", r, ":", sc)
-                results[f"soft_spearman_correlation_radius@{r}"] = sc
+                print("soft spearman correlation (top 100 genes) radius @", r, ":", sc)
+                results[f"soft_correlation_top_100_radius@{r}"] = sc
 
         # F1
         if "soft_f1" in self.config["metrics"]:

@@ -187,8 +187,8 @@ download.
   `soft_accuracy,soft_spearman_correlation,soft_f1`). Available:
   `soft_accuracy`, `soft_spearman_correlation`, `soft_correlation_top_100`, `soft_f1`,
   `gridized_l1_distance`, `gridized_kl_divergence`, `celltype_abundance`,
-  `composition_entropy`, `composition_pairwise`, `delauney_colocalization`,
-  `neighborhood_enrichment`
+  `composition_entropy`, `composition_pairwise`, `delauney_colocalization`.
+  Results go in one column per radius, e.g. `soft_f1_radius@0.05`
 - `--metric_sampling`: percentage of ground-truth cells the metrics are computed
   on (default `100`)
 - `--metric_gene_set_file`: restrict expression metrics to the genes listed in a

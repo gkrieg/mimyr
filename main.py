@@ -11,7 +11,7 @@ from mimyr.models.biological_model import KDEModelForGuidance
 import torch
 import numpy as np
 from mimyr.inference import Inference
-from mimyr.evaluator import Evaluator
+from mimyr.evaluator import Evaluator, METRICS
 from mimyr._resources import METADATA_DIR
 from mimyr import pretrained
 import copy, os, pandas as pd
@@ -498,6 +498,9 @@ def get_args():
     parser.set_defaults(pretrained=preset)
 
     args = parser.parse_args()
+    unknown = [m for m in args.metrics if m not in METRICS]
+    if unknown:
+        parser.error(f"unknown metrics {unknown}; choose from {', '.join(METRICS)}")
     # Any checkpoint not given explicitly comes from the pretrained model on the Hub.
     for role, dest in (("location", "location_model_checkpoint"),
                        ("celltype", "cluster_model_checkpoint"),
