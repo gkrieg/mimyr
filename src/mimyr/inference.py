@@ -1,5 +1,7 @@
 import pickle as pkl
 from collections import defaultdict
+from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -22,6 +24,55 @@ from mimyr.models.generative_transformer.Mimyr import (
     model_inference,
 )
 
+# Section metadata the expression model is prompted with, and the value used
+# when the section does not provide it.
+SECTION_METADATA = {"organ": "Brain", "technology": "M550", "species": "mouse", "disease_state": "healthy"}
+
+
+@dataclass
+class SectionTarget:
+    """Everything inference reads about the section it generates.
+
+    Built from a held-out section by `from_section` (main.py, evaluation) or
+    from a position and bounding box (mimyr.api.Mimyr.generate), so a section
+    can be generated without ground truth.
+    """
+
+    centre: np.ndarray  # (3,) mean aligned_spatial; only the section-axis entry is read
+    lower: np.ndarray  # (3,) in-plane lower bounds (section-axis entry unused)
+    upper: np.ndarray  # (3,) in-plane upper bounds
+    obs_names: pd.Index  # one per generated cell
+    metadata: dict  # SECTION_METADATA key -> per-cell Series or scalar
+    var_names: pd.Index  # gene panel for expression_inference_type "averaging"
+    # Cells whose positive expression sets the bin edges of the reference-guidance prior.
+    bin_edge_source: Optional[AnnData] = None
+    # The real section, when there is one: needed by the "skip" stages, by
+    # teacher forcing, and for the ground-truth plots.
+    ground_truth: Optional[AnnData] = None
+
+    @property
+    def n_cells(self):
+        return len(self.obs_names)
+
+    @classmethod
+    def from_section(cls, section):
+        xyz = section.obsm["aligned_spatial"]
+        return cls(
+            centre=xyz.mean(0),
+            lower=xyz.min(0),
+            upper=xyz.max(0),
+            obs_names=section.obs.index,
+            metadata={k: section.obs[k] for k in SECTION_METADATA if k in section.obs.columns},
+            var_names=section.var_names,
+            bin_edge_source=section,
+            ground_truth=section,
+        )
+
+    def require_ground_truth(self, what):
+        if self.ground_truth is None:
+            raise ValueError(f"{what} needs the real section, which this target has none of")
+        return self.ground_truth
+
 
 class Inference:
     def __init__(self, combined_model, location_model, slice_data_loader, config):
@@ -32,7 +83,7 @@ class Inference:
         self.config = config
 
     # === LOCATION ===
-    def infer_location(self, adata, new_tissue):
+    def infer_location(self, adata, target):
         loc_type = self.config["location_inference_type"]
 
         if loc_type == "model":
@@ -48,7 +99,7 @@ class Inference:
                             [
                                 4,
                                 5,
-                                new_tissue.obsm["aligned_spatial"].mean(0)[-1],
+                                target.centre[-1],
                                 0.0,
                                 0.0,
                                 1.0,
@@ -57,13 +108,13 @@ class Inference:
                     ),
                 )
                 new_column = np.full(
-                    (len(xyz), 1), new_tissue.obsm["aligned_spatial"].mean(0)[-1]
+                    (len(xyz), 1), target.centre[-1]
                 )
                 xyz = np.concatenate([xyz[:, :2], new_column], axis=1)
                 xyz = xyz[
                     np.linalg.norm(xyz - self.slice_data_loader.hole_centers[0], axis=1)
                     < 0.3
-                ][: len(new_tissue)]
+                ][: target.n_cells]
 
             elif self.config["data_mode"] == "rq3":
                 xyz = self.location_model[0].sample_with_guidance(
@@ -76,7 +127,7 @@ class Inference:
                             [
                                 4,
                                 5,
-                                new_tissue.obsm["aligned_spatial"].mean(0)[-1],
+                                target.centre[-1],
                                 0.0,
                                 0.0,
                                 1.0,
@@ -85,14 +136,14 @@ class Inference:
                     ),
                 )
                 new_column = np.full(
-                    (len(xyz), 1), new_tissue.obsm["aligned_spatial"].mean(0)[-1]
+                    (len(xyz), 1), target.centre[-1]
                 )
                 xyz = np.concatenate([xyz[:, :2], new_column], axis=1)
                 xyz = xyz[
-                    (xyz[:, 1] > new_tissue.obsm["aligned_spatial"].min(0)[1])
-                    & (xyz[:, 1] < new_tissue.obsm["aligned_spatial"].max(0)[1])
-                    & (xyz[:, 0] > new_tissue.obsm["aligned_spatial"].min(0)[0])
-                    & (xyz[:, 0] < new_tissue.obsm["aligned_spatial"].max(0)[0])
+                    (xyz[:, 1] > target.lower[1])
+                    & (xyz[:, 1] < target.upper[1])
+                    & (xyz[:, 0] > target.lower[0])
+                    & (xyz[:, 0] < target.upper[0])
                 ]
 
             elif is_sagittal_mode(self.config["data_mode"]):
@@ -110,7 +161,7 @@ class Inference:
                     cond_vec=np.array(
                         [
                             [
-                                new_tissue.obsm["aligned_spatial"].mean(0)[0],
+                                target.centre[0],
                                 5,
                                 5,
                                 1.0,
@@ -120,18 +171,18 @@ class Inference:
                         ]
                     ),
                 )
-                ## Add new_tissue.obsm["aligned_spatial"].mean(0)[0] as a new column
+                ## Add target.centre[0] as a new column
                 new_column = np.full(
-                    (len(xyz), 1), new_tissue.obsm["aligned_spatial"].mean(0)[0]
+                    (len(xyz), 1), target.centre[0]
                 )
                 xyz = np.concatenate([new_column, xyz[:, :2]], axis=1)
 
                 # filter to new tissue y,z bounds
                 xyz = xyz[
-                    (xyz[:, 1] > new_tissue.obsm["aligned_spatial"].min(0)[1])
-                    & (xyz[:, 1] < new_tissue.obsm["aligned_spatial"].max(0)[1])
-                    & (xyz[:, 2] > new_tissue.obsm["aligned_spatial"].min(0)[2])
-                    & (xyz[:, 2] < new_tissue.obsm["aligned_spatial"].max(0)[2])
+                    (xyz[:, 1] > target.lower[1])
+                    & (xyz[:, 1] < target.upper[1])
+                    & (xyz[:, 2] > target.lower[2])
+                    & (xyz[:, 2] < target.upper[2])
                 ]
 
             else:
@@ -145,7 +196,7 @@ class Inference:
                             [
                                 4,
                                 5,
-                                new_tissue.obsm["aligned_spatial"].mean(0)[-1],
+                                target.centre[-1],
                                 0.0,
                                 0.0,
                                 1.0,
@@ -155,44 +206,25 @@ class Inference:
                     small_t_threshold=15,
                 )
                 new_column = np.full(
-                    (len(xyz), 1), new_tissue.obsm["aligned_spatial"].mean(0)[-1]
+                    (len(xyz), 1), target.centre[-1]
                 )
                 xyz = np.concatenate([xyz[:, :2], new_column], axis=1)
                 xyz = xyz[
-                    (xyz[:, 1] > new_tissue.obsm["aligned_spatial"].min(0)[1])
-                    & (xyz[:, 1] < new_tissue.obsm["aligned_spatial"].max(0)[1])
-                    & (xyz[:, 0] > new_tissue.obsm["aligned_spatial"].min(0)[0])
-                    & (xyz[:, 0] < new_tissue.obsm["aligned_spatial"].max(0)[0])
+                    (xyz[:, 1] > target.lower[1])
+                    & (xyz[:, 1] < target.upper[1])
+                    & (xyz[:, 0] > target.lower[0])
+                    & (xyz[:, 0] < target.upper[0])
                 ]
 
             mask = np.all(np.isfinite(xyz), axis=1)
             xyz = xyz[mask]
-
-            # Ground truth
-            xyz_gt = new_tissue.obsm["aligned_spatial"].copy()
-
-            closest_ref_slice = np.argmin(
-                [
-                    np.square(
-                        ref_slice.obsm["aligned_spatial"].mean(0)[-1]
-                        - new_tissue.obsm["aligned_spatial"].mean(0)[-1]
-                    )
-                    for ref_slice in self.slice_data_loader.reference_slices
-                ]
-            )
-            cs = (
-                self.slice_data_loader.reference_slices[closest_ref_slice]
-                .obsm["aligned_spatial"]
-                .copy()
-            )
-            cs[:, -1] = new_tissue.obsm["aligned_spatial"].mean(0)[-1]
 
         elif loc_type == "closest_slice":
             closest_ref_slice = np.argmin(
                 [
                     np.square(
                         ref_slice.obsm["aligned_spatial"].mean(0)[-1]
-                        - new_tissue.obsm["aligned_spatial"].mean(0)[-1]
+                        - target.centre[-1]
                     )
                     for ref_slice in self.slice_data_loader.reference_slices
                 ]
@@ -203,7 +235,7 @@ class Inference:
                 .copy()
             )
             ax = section_axis(self.config["data_mode"])
-            xyz[:, ax] = new_tissue.obsm["aligned_spatial"].mean(0)[ax]
+            xyz[:, ax] = target.centre[ax]
 
 
         n = adata.n_obs
@@ -238,7 +270,7 @@ class Inference:
         self._ct_log_prior_cache = log_prior
         return log_prior
 
-    def infer_cluster(self, adata, new_tissue):
+    def infer_cluster(self, adata, target):
         clust_type = self.config["cluster_inference_type"]
 
         xyz_samples = np.asarray(adata.obsm["spatial"])
@@ -500,7 +532,7 @@ class Inference:
             torch.from_numpy(prior_real),
         )
 
-    def infer_expression(self, pred_data, real_data):
+    def infer_expression(self, pred_data, target):
 
         exp_type = self.config["expression_inference_type"]
 
@@ -513,7 +545,7 @@ class Inference:
             obs = pred_data.obs.copy()
 
             # 2) make a var DataFrame of length 550
-            var = pd.DataFrame(index=real_data.var_names)
+            var = pd.DataFrame(index=target.var_names)
 
             # 4) re-create
             return AnnData(X=rows, obs=obs, var=var, obsm=pred_data.obsm.copy()), None
@@ -559,14 +591,8 @@ class Inference:
             meta_info = torch.load(meta_info_path)
 
             # 1) preserve obs but add necessary technology metadata, etc.
-            for name, default in zip(
-                ["organ", "technology", "species", "disease_state"],
-                ["Brain", "M550", "mouse", "healthy"],
-            ):
-                if name in real_data.obs.columns:
-                    pred_data.obs[name] = real_data.obs[name]
-                else:
-                    pred_data.obs[name] = default
+            for name, default in SECTION_METADATA.items():
+                pred_data.obs[name] = target.metadata.get(name, default)
             # Get higher hierarchy levels
 
             ##IMP TO USE THIS ONE HERE
@@ -623,7 +649,7 @@ class Inference:
                 print(f'using full gene set of {len(meta_info["gene_set"])} genes')
                 var = pd.DataFrame(index=meta_info["gene_set"])
             else:
-                var = pd.DataFrame(index=real_data.var_names)
+                var = pd.DataFrame(index=target.var_names)
 
             # Teacher-forcing knobs (default False => standard free-running inference).
             # cheat_with_tokens: feed GT gene identities, model only predicts values.
@@ -641,6 +667,7 @@ class Inference:
             # 3) build X: zeros for free-running inference, or GT expression aligned
             #    onto the full gene panel when teacher forcing.
             if teacher_fill:
+                real_data = target.require_ground_truth("teacher forcing")
                 real_X = real_data.X
                 real_X = real_X.toarray() if hasattr(real_X, "toarray") else np.asarray(real_X)
                 real_df = pd.DataFrame(real_X, columns=list(real_data.var_names))
@@ -673,18 +700,23 @@ class Inference:
             # the WTF prior both need them for training-consistent binning. The edges
             # encode the training binning rule, so they must be derived from real
             # (positive) expression. In teacher-fill adata_sub.X already holds GT, but
-            # in free-running WTF it is all zeros -- so align real_data onto the model
-            # gene panel and build the edges from that instead.
+            # in free-running WTF it is all zeros -- so align the target's edge source
+            # onto the model gene panel and build the edges from that instead. For a
+            # held-out section (main.py) that source is the section itself; the
+            # Python API uses the reference sections.
             if (teacher_fill or weak_tf) and not hasattr(scml, "bin_edges"):
                 if teacher_fill:
                     edge_adata = adata_sub
                 else:
-                    real_X = real_data.X
+                    edge_source = target.bin_edge_source
+                    if edge_source is None:
+                        raise ValueError("reference guidance needs expression to set its bin edges")
+                    real_X = edge_source.X
                     real_X = (
                         real_X.toarray() if hasattr(real_X, "toarray") else np.asarray(real_X)
                     )
                     real_panel = (
-                        pd.DataFrame(real_X, columns=list(real_data.var_names))
+                        pd.DataFrame(real_X, columns=list(edge_source.var_names))
                         .reindex(columns=list(var.index), fill_value=0.0)
                         .to_numpy(dtype=float)
                     )
@@ -745,6 +777,8 @@ class Inference:
                 print("Expression vals (first 20):")
                 print(new_vals_0[:20])
 
+            if self.config.get("expression_verbose_eval", False) and target.ground_truth is not None:
+                real_data = target.ground_truth
                 gt_vec = real_data.X[0]
                 if hasattr(gt_vec, "toarray"):
                     gt_vec = gt_vec.toarray().ravel()
@@ -783,90 +817,96 @@ class Inference:
 
     # === ORCHESTRATOR ===
     def run_inference(self, adatas):
-        real_data = ad.concat(adatas)
+        """Regenerate the held-out section(s) `adatas`: same position, extent,
+        and number of cells."""
+        return self.generate(SectionTarget.from_section(ad.concat(adatas)))
+
+    def generate(self, target):
+        """Run the three stages for `target`. Plots go to config["artifact_dir"]
+        when it is set; the ground-truth panels need target.ground_truth."""
+        real_data = target.ground_truth
+        artifact_dir = self.config.get("artifact_dir")
+        sagittal = is_sagittal_mode(self.config["data_mode"])
 
         # start with empty shell
-        pred_data = AnnData(obs=pd.DataFrame(index=real_data.obs.index))
+        pred_data = AnnData(obs=pd.DataFrame(index=target.obs_names))
 
         # step 1: location
         if "end" in self.config["location_inference_type"]:
             return pred_data
         elif "skip" in self.config["location_inference_type"]:
+            real_data = target.require_ground_truth("location_inference_type 'skip'")
             pred_data.obsm["spatial"] = real_data.obsm["aligned_spatial"].copy()
         else:
-            pred_data = self.infer_location(pred_data, real_data)
+            pred_data = self.infer_location(pred_data, target)
 
-        plt.figure()
+        if artifact_dir:
+            plt.figure()
 
-        plt.scatter(
-            pred_data.obsm["spatial"][
-                :, (2 if is_sagittal_mode(self.config["data_mode"]) else 0)
-            ],
-            pred_data.obsm["spatial"][:, 1],
-            s=0.1,
-            alpha=0.5,
-        )
-        plt.xlim(0, 12)
-        plt.ylim(0, 8)
-        plt.title("Inferred Locations model")
-        plt.savefig(
-            f"{self.config['artifact_dir']}/inferred_locations_model.png", dpi=300
-        )
+            plt.scatter(
+                pred_data.obsm["spatial"][:, (2 if sagittal else 0)],
+                pred_data.obsm["spatial"][:, 1],
+                s=0.1,
+                alpha=0.5,
+            )
+            plt.xlim(0, 12)
+            plt.ylim(0, 8)
+            plt.title("Inferred Locations model")
+            plt.savefig(f"{artifact_dir}/inferred_locations_model.png", dpi=300)
 
-        plt.figure()
+        if artifact_dir and real_data is not None:
+            plt.figure()
 
-        # Ground truth
-        plt.scatter(
-            real_data.obsm["aligned_spatial"][
-                :, (2 if is_sagittal_mode(self.config["data_mode"]) else 0)
-            ],
-            real_data.obsm["aligned_spatial"][:, 1],
-            s=0.1,
-            alpha=0.5,
-        )
-        plt.xlim(0, 12)
-        plt.ylim(0, 8)
-        plt.title("Ground Truth Locations")
-        plt.savefig(
-            f"{self.config['artifact_dir']}/ground_truth_locations.png", dpi=300
-        )
+            # Ground truth
+            plt.scatter(
+                real_data.obsm["aligned_spatial"][:, (2 if sagittal else 0)],
+                real_data.obsm["aligned_spatial"][:, 1],
+                s=0.1,
+                alpha=0.5,
+            )
+            plt.xlim(0, 12)
+            plt.ylim(0, 8)
+            plt.title("Ground Truth Locations")
+            plt.savefig(f"{artifact_dir}/ground_truth_locations.png", dpi=300)
 
-        plt.figure()
+            plt.figure()
 
         # step 2: cluster
         if "end" in self.config["cluster_inference_type"]:
             return pred_data
         elif "skip" in self.config["cluster_inference_type"]:
+            real_data = target.require_ground_truth("cluster_inference_type 'skip'")
             pred_data.obs["token"] = real_data.obs["token"].copy()
         else:
-            pred_data = self.infer_cluster(pred_data, real_data)
+            pred_data = self.infer_cluster(pred_data, target)
 
         # step 3: expression
-        real_data.obsm["spatial"] = real_data.obsm["aligned_spatial"]
-        assign_shared_colors([real_data, pred_data], color_key="token")
-        plot_spatial_with_palette(
-            real_data,
-            color_key="token",
-            spot_size=0.003,
-            figsize=(10, 10),
-            save=f"./{self.config['artifact_dir']}/real_data_clusters.png",
-            saggital=is_sagittal_mode(self.config["data_mode"]),
-        )
-        plot_spatial_with_palette(
-            pred_data,
-            color_key="token",
-            spot_size=0.003,
-            figsize=(10, 10),
-            save=f"./{self.config['artifact_dir']}/pred_data_clusters.png",
-            saggital=is_sagittal_mode(self.config["data_mode"]),
-        )
+        if artifact_dir and real_data is not None:
+            real_data.obsm["spatial"] = real_data.obsm["aligned_spatial"]
+            assign_shared_colors([real_data, pred_data], color_key="token")
+            plot_spatial_with_palette(
+                real_data,
+                color_key="token",
+                spot_size=0.003,
+                figsize=(10, 10),
+                save=f"./{artifact_dir}/real_data_clusters.png",
+                saggital=sagittal,
+            )
+            plot_spatial_with_palette(
+                pred_data,
+                color_key="token",
+                spot_size=0.003,
+                figsize=(10, 10),
+                save=f"./{artifact_dir}/pred_data_clusters.png",
+                saggital=sagittal,
+            )
 
         if "end" in self.config["expression_inference_type"]:
             return pred_data
         elif "skip" in self.config["expression_inference_type"]:
+            real_data = target.require_ground_truth("expression_inference_type 'skip'")
             pred_data.X = real_data.X.copy()
         else:
-            pred_data, res = self.infer_expression(pred_data, real_data)
-
+            pred_data, res = self.infer_expression(pred_data, target)
 
         return pred_data

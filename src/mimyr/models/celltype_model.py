@@ -475,7 +475,7 @@ class SkeletonCelltypeModel2(nn.Module):
         return self.model(x)
 
     def fit(self, train_adata, val_adata=None, batch_size=32, epochs=10, early_stop_patience=5,
-            neighbor_tokens=None, neighborhood_weight=0.0):
+            neighbor_tokens=None, neighborhood_weight=0.0, save_path="best_model.pt"):
         """Train the position -> cell-type classifier.
 
         neighbor_tokens / neighborhood_weight enable the neighborhood-KL objective:
@@ -573,8 +573,8 @@ class SkeletonCelltypeModel2(nn.Module):
 
         if self.best_model is not None:
             self.model = self.best_model
-            torch.save(self.model.state_dict(), "best_model.pt")
-            print("💾 Best model restored and saved to best_model.pt")
+            torch.save(self.model.state_dict(), save_path)
+            print(f"💾 Best model restored and saved to {save_path}")
 
     def evaluate_val(self, val_adata, sample_size=50000):
         # Low-variance validation score for model selection. The original version

@@ -1667,8 +1667,8 @@ def train(args):
         if rank == 0:
             wandb.log(epoch_log)
 
-        # Save epoch checkpoint
-        if epoch % args.save_frequency == 0 and rank == 0:
+        # Save epoch checkpoint (and always the last one)
+        if (epoch % args.save_frequency == 0 or epoch == args.epochs) and rank == 0:
             ckpt_file = os.path.join(args.output_dir, f"epoch{epoch}_model.pt")
             if dist.is_available() and dist.is_initialized():
                 torch.save(

@@ -12,12 +12,18 @@ depends on how the brain was cut:
 This rule used to be spelled out as a literal `data_mode == "rq4"` at six call
 sites, which silently excluded the other modes that also read Zhuang-ABCA-3
 (`rq4_rq3`, `rq4_noref`). Keep it in one place.
+
+The Python API (mimyr.api) has no paper data mode; it passes the section
+orientation itself, "coronal" or "sagittal", in the data_mode slot.
 """
+
+ORIENTATIONS = ("coronal", "sagittal")
 
 
 def is_sagittal_mode(data_mode) -> bool:
-    """True for the rq4 family (Zhuang-ABCA-3, sectioned sagittally)."""
-    return bool(data_mode) and str(data_mode).startswith("rq4")
+    """True for the rq4 family (Zhuang-ABCA-3, sectioned sagittally) and for
+    data_mode "sagittal"."""
+    return bool(data_mode) and (str(data_mode).startswith("rq4") or str(data_mode) == "sagittal")
 
 
 def section_axis(data_mode) -> int:

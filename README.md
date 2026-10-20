@@ -65,6 +65,85 @@ from the full rq1 data.
 
 ---
 
+## Python API
+
+`main.py` reproduces the paper's experiments. To use MIMYR on your own sections,
+call it from Python. Sections are AnnData objects in the [input format](#input-format).
+
+### Generate a section
+
+```python
+import anndata as ad
+import mimyr
+
+left = ad.read_h5ad("demo_data/sec_13.h5ad")
+right = ad.read_h5ad("demo_data/sec_15.h5ad")
+
+model = mimyr.Mimyr.from_pretrained("merscope")      # paper Fig. 2 model, from the Hub
+section = model.generate(reference=[left, right], position=10.9, seed=0)
+section.write_h5ad("generated.h5ad")
+```
+
+`position` is where the new section goes, in mm along the section axis: `x_ccf`
+for coronal models, `z_ccf` for the sagittal `zhuang3-finetuned`. By default the
+section has the references' extent and their mean number of cells; set `n_cells`
+and `bounds` (e.g. `{"y_ccf": (1.0, 7.5), "z_ccf": (0.5, 10.5)}`) to change that.
+The result has one row per generated cell, with:
+
+- positions in `obs["x_ccf"]`, `obs["y_ccf"]`, `obs["z_ccf"]`;
+- cell types in `obs["class"]`, `obs["subclass"]`, `obs["supertype"]` and `obs["cluster"]`;
+- expression over the model's 2,000-gene panel in `X`, log1p-scaled like the input.
+
+Expression is pulled toward the nearest same-type cell in the references
+(reference guidance) at the strength the paper used. `reference_guidance=0` turns
+it off, and then `reference` is optional if you pass `n_cells` and `bounds`.
+
+Each stage can be swapped for a baseline: `location="closest_slice"`,
+`cell_types="majority_baseline"` or `expression="lookup"`.
+
+### Evaluate against a held-out section
+
+```python
+held_out = ad.read_h5ad("demo_data/sec_14.h5ad")
+section = model.generate(reference=[left, right], position=held_out, seed=0)
+mimyr.evaluate(section, held_out)
+# {'soft_accuracy@0.03': ..., 'soft_spearman_correlation_radius@0.05': ..., 'soft_f1_radius@0.05': ..., ...}
+```
+
+Passing a section as `position` generates it again at the same position, with the
+same extent and number of cells. Its expression is never read. `evaluate` takes
+`metrics=` (any name in `mimyr.evaluator.METRICS`) and `sample=` (the percentage of
+real cells scored).
+
+### Train on your own data
+
+```python
+model = mimyr.Mimyr.from_pretrained("merscope")
+model.train(train=train_sections, val=val_sections, output_dir="runs/my_lab", epochs=20)
+model.save("my_model/")
+
+model = mimyr.Mimyr.from_pretrained("my_model/")       # later
+```
+
+`train` fine-tunes the cell-type classifier and the expression model, starting
+from the current weights; pass `components=("expression",)` to train just one.
+The location model can't be trained through the API. The pretrained one models the
+whole mouse brain in CCF space, so it works for any CCF-registered mouse data.
+
+The models use a fixed vocabulary: the 2,000-gene panel and the 5,274 Allen Brain
+Cell Atlas clusters. Data must use these gene symbols and cluster names; other
+genes are ignored. `mimyr.validate(sections)` reports what's missing or outside the
+vocabulary. To train the expression model on several GPUs, run the script with
+`torchrun --nproc_per_node=4 train.py`. Weights & Biases logging is off unless
+`WANDB_MODE` is set. Batches load in the main process; `num_workers=4` moves loading
+into worker processes. Each worker re-imports your script, so put its code under
+`if __name__ == "__main__":` first.
+
+`generate`, `train` and `evaluate` prepare raw sections themselves. To prepare
+large sections once and reuse them across calls, use `mimyr.prepare(sections)`.
+
+---
+
 ## Pretrained models and data
 
 The pretrained checkpoints are hosted on the Hugging Face Hub at
@@ -107,12 +186,19 @@ et al., *Nature* 2023); please cite those papers if you use them.
 
 Each section is an `.h5ad` file (`.slaf` is also supported) with:
 
-- `obs["x_ccf"]`, `obs["y_ccf"]`, `obs["z_ccf"]`: CCF coordinates, which MIMYR
+- `obs["x_ccf"]`, `obs["y_ccf"]`, `obs["z_ccf"]`: CCF coordinates in mm, which MIMYR
   stacks into `obsm["aligned_spatial"]`
 - `obs["cluster"]`: cell-type labels (choose a different column with `--data_label`).
   Labels are mapped to tokens using the bundled Allen Brain Cell atlas vocabulary,
-  so they must use ABC-atlas names.
-- `X`: the gene expression matrix
+  so they must use ABC-atlas cluster names (e.g. `0001 CLA-EPd-CTX Car3 Glut_1`).
+  The Python API fills in `class`, `subclass` and `supertype` from the cluster
+  when they are missing.
+- `X`: the gene expression matrix, with gene symbols as `var_names`.
+  If any value is above 10, the matrix is taken to be counts and log1p-transformed
+  (it is not normalized first).
+- optionally `obs["technology"]` (`M550` for MERSCOPE 550-gene data, `M1100` for
+  the Zhuang MERFISH data; default `M550`), `obs["species"]` and
+  `obs["disease_state"]` (default `mouse`, `healthy`)
 
 ---
 

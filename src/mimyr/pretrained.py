@@ -27,6 +27,7 @@ _CT_ZHUANG1 = "celltype/celltype_zhuang1.pt"
 PRESETS = {
     "merscope": {
         "description": "Base model trained on the MERSCOPE whole-brain atlas (paper Fig. 2; data_mode rq1 or demo)",
+        "orientation": "coronal",
         "checkpoints": {
             "location": _LOC_MERSCOPE,
             "celltype": _CT_MERSCOPE,
@@ -42,6 +43,7 @@ PRESETS = {
     },
     "zhuang1": {
         "description": "Base model trained on Zhuang-ABCA-1, applied zero-shot to Zhuang-ABCA-2 (paper Fig. 3; data_mode rq3_v2)",
+        "orientation": "coronal",
         "checkpoints": {
             "location": _LOC_ZHUANG1,
             "celltype": _CT_ZHUANG1,
@@ -58,6 +60,7 @@ PRESETS = {
     },
     "zhuang2-finetuned": {
         "description": "Zhuang-1 base model fine-tuned on Zhuang-ABCA-2 (paper Fig. 3; data_mode rq3_v2)",
+        "orientation": "coronal",
         "checkpoints": {
             "location": _LOC_ZHUANG1,
             "celltype": _CT_ZHUANG1,
@@ -74,6 +77,7 @@ PRESETS = {
     },
     "zhuang3-finetuned": {
         "description": "Model fine-tuned on the sagittal Zhuang-ABCA-3 brain (paper Fig. 4; data_mode rq4)",
+        "orientation": "sagittal",
         "checkpoints": {
             "location": _LOC_MERSCOPE,
             "celltype": _CT_MERSCOPE,
