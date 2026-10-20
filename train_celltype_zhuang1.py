@@ -22,8 +22,8 @@ import os
 import numpy as np
 from scipy.spatial import cKDTree
 
-from data_loader import SliceDataLoader
-from models.celltype_model import SkeletonCelltypeModel2
+from mimyr.data_loader import SliceDataLoader
+from mimyr.models.celltype_model import SkeletonCelltypeModel2
 
 
 def compute_neighbor_tokens(adata, k, cache_path=None):
@@ -51,7 +51,7 @@ def compute_neighbor_tokens(adata, k, cache_path=None):
 # Match eval_spatialz_rq3distance_new.py exactly so the token vocab lines up with
 # the rest of the pipeline at inference time.
 DATA_DIR = "/work/magroup/skrieger/tissue_generator/quantized_slices"
-META_DIR = "/work/magroup/skrieger/tissue_generator/spencer_mimyr/models/generative_transformer/metadata"
+from mimyr._resources import METADATA_DIR as META_DIR
 META_INFO = f"{META_DIR}/4hierarchy_metainfo_mouse_geneunion2_DAG.pt"
 ZHUANG_DIR = "/work/magroup/skrieger/MERFISH_BICCN/processed_data"
 

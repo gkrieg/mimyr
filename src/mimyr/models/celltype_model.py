@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import anndata as ad
 
-from metrics import soft_accuracy  # Ensure this function is available
+from mimyr.metrics import soft_accuracy  # Ensure this function is available
 
 
 class FixedFourierFeatureEncoding(nn.Module):
@@ -385,7 +385,7 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 
-from metrics import soft_accuracy  # optional, only if you keep it
+from mimyr.metrics import soft_accuracy  # optional, only if you keep it
 
 
 class SkeletonCelltypeModel(nn.Module):
@@ -447,7 +447,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-from metrics import soft_accuracy  # keep this import
+from mimyr.metrics import soft_accuracy  # keep this import
 
 
 class SkeletonCelltypeModel2(nn.Module):

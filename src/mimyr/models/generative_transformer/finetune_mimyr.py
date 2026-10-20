@@ -28,6 +28,7 @@ from .model.model import MimyrConfig, MimyrModel
 from .utils.hf_tokenizer import MimyrTokenizer
 from .data_util import get_generation_dataloader, harmonize_dataset, summarize_sample_ddp
 from .Mimyr import tokens_and_vals_to_expression_row
+from mimyr._resources import METADATA_DIR
 
 from scipy.stats import pearsonr
 import numpy as np
@@ -682,7 +683,14 @@ def get_parser():
     parser.add_argument(
         "--from-finetuned",
         action="store_true",
-        help="Indicate checkpoint already includes finetuned vocab size",
+        default=True,
+        help="Load the checkpoint's weights and resume its epoch count (the default)",
+    )
+    parser.add_argument(
+        "--random-init",
+        dest="from_finetuned",
+        action="store_false",
+        help="Use only the checkpoint's architecture and start from random weights",
     )
     parser.add_argument(
         "--overwrite-vocab-size",
@@ -723,7 +731,7 @@ def get_parser():
     parser.add_argument(
         "--metadata-dir",
         type=str,
-        default="model_checkpoints/metadata",
+        default=METADATA_DIR,
         help="Directory containing metadata files (edges_x/y/z.pkl, meta_info .pt) for harmonization",
     )
     parser.add_argument(
@@ -926,6 +934,8 @@ def train(args):
         return
 
     # 1) Load pretrained checkpoint
+    if args.ckp_path is None:
+        args.from_finetuned = False  # training from scratch: no weights to load
     if args.ckp_path is not None:
         ckp = torch.load(args.ckp_path, map_location="cpu")
     else:
@@ -1019,7 +1029,7 @@ def train(args):
 
     # 4) Load train/val AnnData from data_loader (or cache if available)
     import scanpy as _sc
-    from data_loader import SliceDataLoader
+    from mimyr.data_loader import SliceDataLoader
 
     train_cache = _find_cache("train")
     val_cache = _find_cache("val")
@@ -1028,7 +1038,7 @@ def train(args):
     if cache_exists:
         if rank == 0:
             print(f"Loading preprocessed adata from cache in {args.output_dir} ({os.path.basename(train_cache)}, {os.path.basename(val_cache)})")
-        from data_loader import _read_slice
+        from mimyr.data_loader import _read_slice
         adata_train = _read_slice(train_cache)
         adata_val = _read_slice(val_cache)
         adata_test = None
@@ -1037,6 +1047,7 @@ def train(args):
             "data_dir": args.data_dir,
             "meta_info": os.path.basename(args.meta_info),
             "zhuang_data_dir": getattr(args, "zhuang_data_dir", None),
+            "demo_data_dir": getattr(args, "demo_data_dir", None),
             "use_rq1_train": getattr(args, "use_rq1_train", False),
         }
         slice_loader = SliceDataLoader(
@@ -1673,14 +1684,13 @@ def train(args):
                     ckpt_file,
                 )
 
-    # 8) Save final artifacts
-    # model.save_pretrained(args.output_dir)
-    MimyrConfig(**ckp["model_args"]).save_pretrained(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
-    print(f"Finetuned artifacts written to {args.output_dir}")
+    # 8) Done. Each epochN_model.pt holds the weights and model_args, and the
+    # tokenizer is rebuilt from meta_info, so there is nothing else to save.
     if rank == 0:
+        print(f"Checkpoints written to {args.output_dir}")
         wandb.finish()
-    dist.destroy_process_group()
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def main():

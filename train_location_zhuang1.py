@@ -36,8 +36,8 @@ import copy
 
 import numpy as np
 
-from data_loader import SliceDataLoader
-from models.diffusion_model import DDPMTrainer
+from mimyr.data_loader import SliceDataLoader
+from mimyr.models.diffusion_model import DDPMTrainer
 # IMPORTANT: use the SAME TrainConfig that CombinedModel builds the model with at
 # inference (models/combined_model.py), NOT models.diffusion_model.TrainConfig.
 # They differ in ways that MUST match between train and inference:
@@ -46,10 +46,10 @@ from models.diffusion_model import DDPMTrainer
 #   - schedule: n_timesteps=70 (the diffusion_model default is 1000 -> sampling with
 #           70 steps would be garbage)
 # The production checkpoint loads exactly into this arch (verified via load_state_dict).
-from models.combined_model import TrainConfig
+from mimyr.models.combined_model import TrainConfig
 
 DATA_DIR = "/work/magroup/skrieger/tissue_generator/quantized_slices"
-META_DIR = "/work/magroup/skrieger/tissue_generator/spencer_mimyr/models/generative_transformer/metadata"
+from mimyr._resources import METADATA_DIR as META_DIR
 META_INFO = f"{META_DIR}/4hierarchy_metainfo_mouse_geneunion2_DAG.pt"
 ZHUANG_DIR = "/work/magroup/skrieger/MERFISH_BICCN/processed_data"
 

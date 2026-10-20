@@ -31,10 +31,10 @@ diseased_data_dir: /work/magroup/skrieger/tissue_generator/CCF_registration/ccf_
 #   edges_x.pkl, edges_y.pkl, edges_z.pkl  — coordinate bin edges
 #   hierarchy.pkl                           — cell-type hierarchy
 #   <meta_info>.pt                          — token/gene set (pointed to by --meta_info)
-expression_metadata_dir: /work/magroup/skrieger/tissue_generator/spencer_mimyr/models/generative_transformer/metadata
+expression_metadata_dir: /work/magroup/skrieger/tissue_generator/spencer_mimyr/src/mimyr/models/generative_transformer/metadata
 
 # Full path to the meta_info .pt file (token/gene set used by the expression model).
-meta_info: /work/magroup/skrieger/tissue_generator/spencer_mimyr/models/generative_transformer/metadata/4hierarchy_metainfo_mouse_geneunion2_DAG.pt
+meta_info: /work/magroup/skrieger/tissue_generator/spencer_mimyr/src/mimyr/models/generative_transformer/metadata/4hierarchy_metainfo_mouse_geneunion2_DAG.pt
 
 # ---------------------------------------------------------------------------
 # Model checkpoints
@@ -43,6 +43,18 @@ meta_info: /work/magroup/skrieger/tissue_generator/spencer_mimyr/models/generati
 location_model_checkpoint: model_checkpoints/smoothtune_conditional_ddpm_2d_checkpoint_400.pt
 cluster_model_checkpoint: model_checkpoints/best_model_rq1.pt
 expression_model_checkpoint: model_checkpoints/TG-base4_epoch4_model.pt
+
+# ---------------------------------------------------------------------------
+# Inference settings
+# ---------------------------------------------------------------------------
+# The default pretrained model (--pretrained merscope) turns on reference guidance
+# at strength 75 and metric_filter_by_gt, matching paper Fig. 2. The lab's run
+# scripts pass these explicitly when they want them, so keep them off here.
+expression_weak_teacher_forcing: false
+wtf_strength_gene: 0.0
+wtf_strength_bin: 0.0
+wtf_strength_value: 0.0
+metric_filter_by_gt: false
 
 # ---------------------------------------------------------------------------
 # Output

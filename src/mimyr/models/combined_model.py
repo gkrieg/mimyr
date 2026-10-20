@@ -1,7 +1,9 @@
 from dataclasses import dataclass
-from models.diffusion_model import DDPMTrainer
-from models.celltype_model import SkeletonCelltypeModel2
-from data_loader import _read_slice
+from mimyr.models.diffusion_model import DDPMTrainer
+from mimyr.models.celltype_model import SkeletonCelltypeModel2
+from mimyr.data_loader import _read_slice
+import pickle
+import types
 import torch
 
 @dataclass
@@ -32,6 +34,23 @@ class TrainConfig:
     # whether train() renders the in-loop 200k-point sample figures (headless: off).
     viz: bool = True
 
+class _LegacyUnpickler(pickle.Unpickler):
+    """Location checkpoints pickle their TrainConfig under the module path it had
+    when they were saved: ``__main__`` (saved from main.py) or
+    ``models.combined_model`` (pre-package layout). Resolve both to this module so
+    the checkpoints load from any script. The config itself is never read."""
+
+    def find_class(self, module, name):
+        if name == "TrainConfig" and module in ("__main__", "models.combined_model"):
+            return TrainConfig
+        return super().find_class(module, name)
+
+
+_legacy_pickle = types.ModuleType("mimyr_legacy_pickle")
+_legacy_pickle.Unpickler = _LegacyUnpickler
+_legacy_pickle.load = lambda f, **kw: _LegacyUnpickler(f, **kw).load()
+
+
 class CombinedModel:
     def __init__(self, location_model_checkpoint=None, celltype_model_checkpoint=None, gene_exp_model_checkpoint=None):
 
@@ -43,7 +62,8 @@ class CombinedModel:
             ckpt = torch.load(
                 location_model_checkpoint,
                 map_location=self.trainer.device,
-                weights_only=False
+                weights_only=False,
+                pickle_module=_legacy_pickle,
             )
             self.trainer.model.load_state_dict(ckpt["model"])
             self.trainer.ema.shadow = ckpt["ema"]

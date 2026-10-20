@@ -54,3 +54,12 @@ run_eval_spatialz_rq1_new.sbatch
 run_main_experiments.sbatch
 models/slurm/
 models/generative_transformer/Testing.ipynb
+
+# Package metadata files bundled with mimyr (override the *.pt / *.pkl rules above)
+!src/mimyr/models/generative_transformer/metadata/*.pt
+!src/mimyr/models/generative_transformer/metadata/*.pkl
+
+# Python packaging build outputs
+build/
+dist/
+*.egg-info/

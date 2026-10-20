@@ -2,6 +2,8 @@ import pickle as pkl
 import anndata as ad
 import torch.nn as nn
 
+from mimyr._resources import ID_TO_SUBCLASS_PATH
+
 
 class GeneExpModel(nn.Module):
     def __init__(self, slices, label="subclass"):
@@ -17,7 +19,7 @@ class GeneExpModel(nn.Module):
         try:
             self.id_to_subclass = pkl.load(
                 open(
-                    "data/id_to_subclass.pkl",
+                    ID_TO_SUBCLASS_PATH,
                     "rb",
                 )
             )
