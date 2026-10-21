@@ -44,8 +44,6 @@ class SectionTarget:
     obs_names: pd.Index  # one per generated cell
     metadata: dict  # SECTION_METADATA key -> per-cell Series or scalar
     var_names: pd.Index  # gene panel for expression_inference_type "averaging"
-    # Cells whose positive expression sets the bin edges of the reference-guidance prior.
-    bin_edge_source: Optional[AnnData] = None
     # The real section, when there is one: needed by the "skip" stages, by
     # teacher forcing, and for the ground-truth plots.
     ground_truth: Optional[AnnData] = None
@@ -64,7 +62,6 @@ class SectionTarget:
             obs_names=section.obs.index,
             metadata={k: section.obs[k] for k in SECTION_METADATA if k in section.obs.columns},
             var_names=section.var_names,
-            bin_edge_source=section,
             ground_truth=section,
         )
 
@@ -72,6 +69,23 @@ class SectionTarget:
         if self.ground_truth is None:
             raise ValueError(f"{what} needs the real section, which this target has none of")
         return self.ground_truth
+
+
+def panel_bin_edges(sections, gene_set, n_express_level):
+    """compute_global_bin_edges over several sections: n_express_level equal bins
+    between the smallest and largest positive value of the panel genes. Reads one
+    section at a time, so a large reference pool is never concatenated or made dense."""
+    lo, hi = np.inf, -np.inf
+    for s in sections:
+        cols = s.var_names.get_indexer(list(gene_set))
+        X = s.X[:, cols[cols >= 0]]
+        vals = X.data if hasattr(X, "tocsr") else np.asarray(X).ravel()
+        vals = vals[vals > 0]
+        if vals.size:
+            lo, hi = min(lo, vals.min()), max(hi, vals.max())
+    if not np.isfinite(lo):
+        raise ValueError("No positive expression values found to build edges")
+    return np.linspace(lo, hi, n_express_level + 1)
 
 
 class Inference:
@@ -698,31 +712,12 @@ class Inference:
 
             # model_inference does not set bin_edges; teacher-forced GT binning and
             # the WTF prior both need them for training-consistent binning. The edges
-            # encode the training binning rule, so they must be derived from real
-            # (positive) expression. In teacher-fill adata_sub.X already holds GT, but
-            # in free-running WTF it is all zeros -- so align the target's edge source
-            # onto the model gene panel and build the edges from that instead. For a
-            # held-out section (main.py) that source is the section itself; the
-            # Python API uses the reference sections.
+            # encode the training binning rule, so they come from real (positive)
+            # expression: the reference sections plus any training sections loaded,
+            # never the section being generated.
             if (teacher_fill or weak_tf) and not hasattr(scml, "bin_edges"):
-                if teacher_fill:
-                    edge_adata = adata_sub
-                else:
-                    edge_source = target.bin_edge_source
-                    if edge_source is None:
-                        raise ValueError("reference guidance needs expression to set its bin edges")
-                    real_X = edge_source.X
-                    real_X = (
-                        real_X.toarray() if hasattr(real_X, "toarray") else np.asarray(real_X)
-                    )
-                    real_panel = (
-                        pd.DataFrame(real_X, columns=list(edge_source.var_names))
-                        .reindex(columns=list(var.index), fill_value=0.0)
-                        .to_numpy(dtype=float)
-                    )
-                    edge_adata = AnnData(X=real_panel, var=var.copy())
-                bin_edges = compute_global_bin_edges(
-                    edge_adata, meta_info["gene_set"], scml.n_express_level
+                bin_edges = panel_bin_edges(
+                    self._bin_edge_sections(), meta_info["gene_set"], scml.n_express_level
                 )
                 scml.bin_edges = torch.tensor(bin_edges)
 
@@ -814,6 +809,13 @@ class Inference:
                 adata.uns["wtf_n_express_level"] = self._wtf_n_levels
 
             return adata, results
+
+    def _bin_edge_sections(self):
+        sdl = self.slice_data_loader
+        sections = list(sdl.reference_slices or []) + list(getattr(sdl, "train_slices", None) or [])
+        if not sections:
+            raise ValueError("expression bin edges need reference or training sections")
+        return sections
 
     # === ORCHESTRATOR ===
     def run_inference(self, adatas):

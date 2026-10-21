@@ -375,7 +375,6 @@ class Mimyr:
             held_out = prepare(position, omit_x=self.omit_x)
             target = SectionTarget.from_section(held_out)
             target.ground_truth = None  # regenerate it, never read it
-            target.bin_edge_source = pool
             if n_cells is not None:
                 target.obs_names = pd.Index([f"cell_{i}" for i in range(n_cells)])
                 target.metadata = {k: v.mode().iloc[0] for k, v in target.metadata.items()}
@@ -404,7 +403,6 @@ class Mimyr:
                 obs_names=pd.Index([f"cell_{i}" for i in range(n_cells)]),
                 metadata=metadata,
                 var_names=pool.var_names if pool is not None else pd.Index([]),
-                bin_edge_source=pool,
             )
 
         config.update(
