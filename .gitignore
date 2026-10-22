@@ -1,0 +1,65 @@
+
+*/__pycache__/*
+*.pyc
+dump
+ops
+*.csv
+*.out
+experimentation
+wandb
+model_checkpoints
+*.pt
+*.pkl
+*.png
+artifacts
+plot_creator.ipynb
+plots
+main.ipynb
+
+# SLURM job output logs
+Eval-*.txt
+TG_base-*.txt
+TG_base_slaf-*.txt
+models/rq3_finetune-*.txt
+models/rq4_finetune-*.txt
+
+# Diagnostic / scratch caches
+expr_debug/
+
+# Binary artifacts
+*.zip
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+# Large local data, figures, and personal files
+SpatialZ/
+paper_figures/
+Figure_plotting.ipynb
+Mimyr_biorxiv.pdf
+.claude/
+
+# Local experiment, analysis, and job scripts
+experiments/
+analyze_generalization.py
+analyze_pairwise_offline.py
+analyze_wtf_jaccard.py
+check_byte_identical.py
+eval_spatialz_rq1_new.py
+eval_spatialz_rq3distance_new.py
+plot_accuracy_vs_distance.py
+wtf_gt_metrics.py
+final_experimental_results.sh
+run_eval_spatialz_rq1_new.sbatch
+run_main_experiments.sbatch
+models/slurm/
+models/generative_transformer/Testing.ipynb
+
+# Package metadata files bundled with mimyr (override the *.pt / *.pkl rules above)
+!src/mimyr/models/generative_transformer/metadata/*.pt
+!src/mimyr/models/generative_transformer/metadata/*.pkl
+
+# Python packaging build outputs
+build/
+dist/
+*.egg-info/

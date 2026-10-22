@@ -1,0 +1,39 @@
+cff-version: 1.2.0
+message: "If you use MIMYR, please cite the paper below."
+title: "MIMYR"
+type: software
+version: 0.1.0
+license: MIT
+repository-code: "https://github.com/gkrieg/mimyr"
+authors:
+  - given-names: Ajinkya
+    family-names: Deshpande
+  - given-names: Zhilei
+    family-names: Bei
+  - given-names: Jian
+    family-names: Ma
+  - given-names: Spencer
+    family-names: Krieger
+preferred-citation:
+  type: article
+  title: "MIMYR: Generative modeling of missing tissue in spatial transcriptomics"
+  authors:
+    - given-names: Ajinkya
+      family-names: Deshpande
+    - given-names: Zhilei
+      family-names: Bei
+    - given-names: Jian
+      family-names: Ma
+    - given-names: Spencer
+      family-names: Krieger
+  journal: "bioRxiv"
+  year: 2025
+  month: 11
+  doi: "10.1101/2025.11.24.690239"
+  identifiers:
+    - type: doi
+      value: "10.1101/2025.11.24.690239"
+    - type: other
+      value: "PMID: 41394599"
+    - type: other
+      value: "PMCID: PMC12697367"

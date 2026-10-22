@@ -1,0 +1,78 @@
+# Build the mimyr package and publish it to TestPyPI or PyPI with trusted publishing.
+#
+# Run by hand from the Actions tab (or `gh workflow run publish.yml -f target=testpypi`).
+# Only the `mimyr` package is uploaded: the build fails if the wheel or sdist contains
+# anything else (scripts, reproducibility/, configs, demo data, checkpoints, ...).
+
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Where to publish
+        type: choice
+        options: [testpypi, pypi]
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          twine check --strict dist/*
+      - name: Check that only the mimyr package is included
+        shell: python
+        run: |
+          import glob, tarfile, zipfile, sys
+          bad = []
+          for whl in glob.glob("dist/*.whl"):
+              for name in zipfile.ZipFile(whl).namelist():
+                  if not (name.startswith("mimyr/") or (name.startswith("mimyr-") and ".dist-info/" in name)):
+                      bad.append(f"{whl}: {name}")
+          for sdist in glob.glob("dist/*.tar.gz"):
+              for m in tarfile.open(sdist).getmembers():
+                  if m.isdir():
+                      continue
+                  rel = m.name.split("/", 1)[1]
+                  if not (rel.startswith(("src/mimyr/", "src/mimyr.egg-info/"))
+                          or rel in ("README.md", "LICENSE", "pyproject.toml", "setup.cfg", "PKG-INFO")):
+                      bad.append(f"{sdist}: {rel}")
+          for name in sorted(glob.glob("dist/*")):
+              print(name)
+          if bad:
+              print("Files outside the mimyr package:", *bad, sep="\n  ")
+              sys.exit(1)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.target }}
+      url: ${{ inputs.target == 'pypi' && 'https://pypi.org/p/mimyr' || 'https://test.pypi.org/p/mimyr' }}
+    permissions:
+      id-token: write  # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - name: Publish to TestPyPI
+        if: inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+      - name: Publish to PyPI
+        if: inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@release/v1
